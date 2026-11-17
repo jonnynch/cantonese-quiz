@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>識字小天地</title>
+<style>
+:root{--bg:#faf8f2;--ink:#1d2b3a;--mut:#667180;--card:#fff;--line:#ddd7c9;--jade:#2f7d6b;--red:#c8402f;--on:#fff;color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14191f;--ink:#eee9dd;--mut:#9aa4b0;--card:#1e252d;--line:#333c46;--jade:#5fb59f;--red:#e8705f;--on:#10151a;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#14191f;--ink:#eee9dd;--mut:#9aa4b0;--card:#1e252d;--line:#333c46;--jade:#5fb59f;--red:#e8705f;--on:#10151a;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:18px/1.5 -apple-system,"PingFang HK","Noto Sans TC","Microsoft JhengHei",sans-serif}
+.han{font-family:"Kaiti TC","BiauKai","DFKai-SB","Noto Serif TC",serif}
+#nav{display:flex;gap:6px;padding:10px 12px;border-bottom:2px solid var(--line);overflow-x:auto}
+#nav button{flex:1;min-height:52px;min-width:84px;border:0;border-radius:12px;background:transparent;color:var(--mut);font:inherit;font-weight:700;white-space:nowrap}
+#nav button.on{background:var(--ink);color:var(--bg)}
+#main{max-width:980px;margin:0 auto;padding:16px}
+h2,h3,h4{margin:.2em 0 .4em}small{color:var(--mut);font-weight:400}
+.b{min-height:56px;padding:0 24px;border-radius:14px;border:2px solid var(--line);background:var(--card);color:var(--ink);font:inherit;font-weight:700;cursor:pointer}
+.b.p{background:var(--jade);border-color:var(--jade);color:var(--on)}
+.b.r{background:var(--red);border-color:var(--red);color:var(--on)}
+.b.on{outline:4px solid var(--ink)}
+.b:disabled{opacity:.4}
+.card{background:var(--card);border:2px solid var(--line);border-radius:16px;padding:14px;margin:0 0 12px}
+.row{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:10px 0}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px}
+.bar{display:flex;justify-content:space-between;align-items:center;font-weight:700}
+.stage{display:flex;flex-direction:column;align-items:center;gap:6px}
+.big{font-size:min(46vw,42vh,340px);line-height:1.1;margin:6px 0}
+.mid{font-size:64px;line-height:1.1}
+.ans{font-size:72px;min-height:80px;line-height:1.1}
+.spk{font-size:26px;min-width:150px;min-height:72px}
+canvas{width:min(92vw,calc(100vh - 360px),640px);min-width:260px;aspect-ratio:1;background:#fff;border:3px solid var(--ink);border-radius:8px;touch-action:none}
+.mk img,.card img{width:100%;max-width:240px;border:1px solid var(--line);background:#fff;border-radius:6px}
+.line{display:flex;justify-content:space-between;width:100%;padding:6px 0;border-top:1px solid var(--line)}
+button.line{border-radius:0;background:transparent;min-height:48px;padding:0 4px}
+.g{color:var(--jade)}.rd{color:var(--red)}.warn{color:var(--red);margin:4px 0}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:16px;z-index:9}
+.modal form{width:min(460px,100%);max-height:100%;overflow:auto}
+label{display:block;margin:8px 0;font-weight:600}
+input{width:100%;min-height:50px;font:inherit;padding:0 12px;border:2px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink)}
+#toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 18px;border-radius:12px;z-index:10}
+</style></head><body>
+<div id="nav"></div><div id="main"></div>
+<script>
+const K='cantonese-quiz-v1';
+let D=load(),tab='levels',lid=null,rid=null,inS=false,res=null,cv,cx,drawing=false,dirty=false;
+function load(){try{const d=JSON.parse(localStorage.getItem(K));if(d&&Array.isArray(d.levels)&&Array.isArray(d.records))return d}catch(e){}return{levels:[],records:[],cur:null}}
+function save(){try{localStorage.setItem(K,JSON.stringify(D));return true}catch(e){alert('儲存失敗：空間不足。請先到「設定」匯出備份。');return false}}
+const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,8);
+const $=s=>document.querySelector(s);
+const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const lv=id=>D.levels.find(l=>l.id===id);
+const fd=t=>new Date(t).toLocaleString('zh-HK');
+const NAME={read:{practice:'讀字練習',revision:'讀字溫習',exam:'讀字考試'},write:{practice:'聽音寫字',revision:'寫字溫習',exam:'寫字考試'}};
+const LB=r=>NAME[r.kind][r.mode];
+function shuf(a){a=a.slice();for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]]}return a}
+function toast(t){let e=$('#toast');if(!e){e=document.createElement('div');e.id='toast';document.body.appendChild(e)}e.textContent=t;e.hidden=false;clearTimeout(toast.t);toast.t=setTimeout(()=>e.hidden=true,2600)}
+function render(){
+  $('#nav').innerHTML=[['levels','級別管理'],['practice','練習'],['exam','考試'],['hist','學習紀錄'],['set','設定']].map(([k,t])=>`<button class="${tab===k&&!inS?'on':''}" onclick="go('${k}')">${t}</button>`).join('');
+  const m=$('#main');if(inS)return sess(m);
+  ({levels:vLevels,practice:vPick,exam:vPick,hist:vHist,set:vSet})[tab](m);
+}
+function go(t){inS=false;res=null;tab=t;lid=null;rid=null;render()}
+/* ---------- forms ---------- */
+function form(title,fields,vals,cb){
+  const d=document.createElement('div');d.className='modal';
+  d.innerHTML=`<form class="card"><h3>${title}</h3>${fields.map(([k,l])=>`<label>${l}<input name="${k}" value="${esc(vals[k])}" autocomplete="off"></label>`).join('')}<div class="row"><button type="button" class="b" id="x">取消</button><button class="b p">儲存</button></div></form>`;
+  document.body.appendChild(d);const f=d.querySelector('form');
+  d.querySelector('#x').onclick=()=>d.remove();
+  f.onsubmit=e=>{e.preventDefault();const o=Object.fromEntries(new FormData(f));for(const k in o)o[k]=o[k].trim();if(cb(o)!==false)d.remove()};
+}
+/* ---------- level management ---------- */
+function vLevels(m){
+  if(lid&&lv(lid)){const L=lv(lid);
+    m.innerHTML=`<div class="row"><button class="b" onclick="lid=null;render()">返回</button><h2 style="margin:0">${esc(L.name)} <small>${L.chars.length} 字</small></h2></div>${L.desc?`<p>${esc(L.desc)}</p>`:''}<div class="row"><button class="b p" onclick="charForm()">新增字</button></div><div class="grid">`+
+    L.chars.map(c=>`<div class="card"><div class="han mid">${esc(c.c)}</div><div>${esc(c.jp)}</div><div>${esc(c.w)} <small>${esc(c.wjp)}</small></div><div><small>${esc(c.m)}</small></div><div class="row"><button class="b" onclick="charForm('${c.id}')">編輯</button><button class="b r" onclick="delChar('${c.id}')">刪除</button></div></div>`).join('')+'</div>'+(L.chars.length?'':'<p>這個級別還沒有字。</p>');return}
+  m.innerHTML=`<div class="row"><h2 style="margin:0">級別管理</h2><button class="b p" onclick="addLevel()">新增級別</button></div>`+
+  (D.levels.map(L=>`<div class="card"><h3>${esc(L.name)} <small>${L.chars.length} 字</small></h3>${L.desc?`<p>${esc(L.desc)}</p>`:''}<div class="row"><button class="b p" onclick="lid='${L.id}';render()">查看</button><button class="b" onclick="renLevel('${L.id}')">重新命名</button><button class="b r" onclick="delLevel('${L.id}')">刪除</button></div></div>`).join('')||'<p>還沒有級別，請先新增。</p>');
+}
+function addLevel(){form('新增級別',[['name','名稱'],['desc','說明（可選）']],{},o=>{if(!o.name)return false;const t=Date.now();D.levels.push({id:uid(),name:o.name,desc:o.desc,chars:[],created:t,modified:t});save();render()})}
+function renLevel(id){const L=lv(id);form('重新命名',[['name','名稱'],['desc','說明（可選）']],L,o=>{if(!o.name)return false;L.name=o.name;L.desc=o.desc;L.modified=Date.now();save();render()})}
+function delLevel(id){if(!confirm('刪除這個級別和裏面所有的字？此動作無法復原。'))return;D.levels=D.levels.filter(l=>l.id!==id);if(D.cur&&D.cur.levelId===id)D.cur=null;save();render()}
+function charForm(id){const L=lv(lid),c=id?L.chars.find(x=>x.id===id):{};
+  form(id?'編輯字':'新增字',[['c','字'],['jp','粵拼'],['w','詞語'],['wjp','詞語粵拼'],['m','意思']],c,o=>{
+    if([...o.c].length!==1){alert('「字」欄位請輸入一個繁體字');return false}
+    if(id)Object.assign(c,o);else L.chars.push({id:uid(),...o});
+    L.modified=Date.now();save();render()})}
+function delChar(id){if(!confirm('刪除這個字？'))return;const L=lv(lid);L.chars=L.chars.filter(c=>c.id!==id);L.modified=Date.now();save();render()}
+/* ---------- practice / exam picker ---------- */
+function vPick(m){
+  const ex=tab==='exam',md=ex?'exam':'practice',lab=ex?['讀字考試','寫字考試']:['讀字練習','聽音寫字'];let h='';
+  if(D.cur){const s=D.cur;h+=`<div class="card"><b>有未完成的${LB(s)}</b>（${esc(lv(s.levelId)?lv(s.levelId).name:'')}，${s.phase==='mark'?'評分中':'第 '+(s.i+1)+' / '+s.items.length+' 題'}）<div class="row"><button class="b p" onclick="resume()">繼續</button><button class="b r" onclick="discard()">放棄</button></div></div>`}
+  h+=D.levels.map(L=>{const n=L.chars.length,low=ex&&n<20,ok=n&&!low;
+    return `<div class="card"><h3>${esc(L.name)} <small>${n} 字</small></h3>${low?'<div class="warn">需要至少 20 個字才可以考試。</div>':''}<div class="row"><button class="b p" ${ok?'':'disabled'} onclick="start('read','${L.id}','${md}')">${lab[0]}</button><button class="b p" ${ok?'':'disabled'} onclick="start('write','${L.id}','${md}')">${lab[1]}</button></div></div>`}).join('')||'<p>請先到「級別管理」新增級別和字。</p>';
+  m.innerHTML=`<h2>${ex?'考試':'練習'}</h2>`+h;
+}
+function resume(){inS=true;res=null;render()}
+function discard(){if(!confirm('確定放棄這次未完成的測驗？'))return;D.cur=null;save();render()}
+function start(kind,levelId,mode){
+  const L=lv(levelId);let cs=L.chars;
+  if(mode==='exam'){if(cs.length<20)return;cs=shuf(cs).slice(0,20)}
+  if(!cs.length)return;
+  if(D.cur&&!confirm('有未完成的測驗，要放棄並開始新的嗎？'))return;
+  mk(kind,levelId,mode,cs,null);
+}
+function mk(kind,levelId,mode,chars,parentId){
+  D.cur={id:uid(),levelId,kind,mode,parentId,started:Date.now(),i:0,phase:'ask',
+    items:shuf(chars).map(c=>({cid:c.id,c:c.c,jp:c.jp||'',w:c.w||'',wjp:c.wjp||'',ok:null,img:null}))};
+  save();inS=true;res=null;render();
+}
+/* ---------- session ---------- */
+function sess(m){
+  if(res)return result(m);
+  const s=D.cur;if(!s){inS=false;return render()}
+  if(s.phase==='mark')return marking(m,s);
+  const it=s.items[s.i],n=s.items.length;
+  const head=`<div class="bar"><span>${s.i+1} / ${n}</span><button class="b" onclick="cancel()">取消</button></div>`;
+  if(s.kind==='read'){
+    m.innerHTML=head+`<div class="stage"><div class="big han">${esc(it.c)}</div><div class="row"><button class="b r" style="min-width:150px;min-height:72px" onclick="mark(false)">錯誤</button><button class="b p" style="min-width:150px;min-height:72px" onclick="mark(true)">正確</button></div></div>`;return;
+  }
+  m.innerHTML=head+`<div class="stage"><div class="row"><button class="b spk" onclick="say('w')" ${it.w?'':'disabled'} aria-label="詞語發音">🔊 詞語</button><button class="b spk" onclick="say('c')" aria-label="單字發音">🔊 單字</button></div>`+
+    (s.mode==='exam'?'':`<div class="row"><button class="b" id="rv" onclick="rev()">顯示答案</button><span id="ans" class="han ans"></span></div>`)+
+    `<canvas id="cv" width="640" height="640"></canvas><div class="row"><button class="b" onclick="clr()">清除</button><button class="b" onclick="clr()">重寫</button><button class="b p" onclick="done()">${s.i+1<n?'下一題':'完成'}</button></div></div>`;
+  initCv();
+}
+function cancel(){if(!confirm('取消這次測驗？目前進度不會保留。'))return;D.cur=null;save();inS=false;render()}
+function mark(ok){const s=D.cur,it=s.items[s.i];if(!it||it.ok!==null)return;it.ok=ok;s.i++;if(s.i>=s.items.length)return finish();save();render()}
+function say(k){const it=D.cur.items[D.cur.i];speak(k==='w'?it.w:it.c)}
+function speak(t){
+  if(!t)return;const ss=window.speechSynthesis;if(!ss||!window.SpeechSynthesisUtterance){toast('這部裝置不支援語音');return}
+  const v=ss.getVoices().find(x=>/zh[-_]HK|yue/i.test(x.lang));
+  if(!v)toast('找不到廣東話語音，發音可能不準確');
+  ss.cancel();const u=new SpeechSynthesisUtterance(t);u.lang='zh-HK';if(v)u.voice=v;u.rate=.8;ss.speak(u);
+}
+function rev(){const a=$('#ans'),b=$('#rv');if(a.textContent){a.textContent='';b.textContent='顯示答案'}else{a.textContent=D.cur.items[D.cur.i].c;b.textContent='隱藏答案'}}
+function initCv(){
+  cv=$('#cv');cx=cv.getContext('2d');cx.lineWidth=10;cx.lineCap=cx.lineJoin='round';cx.strokeStyle='#111';clr(true);
+  const pt=e=>{const r=cv.getBoundingClientRect();return[(e.clientX-r.left)*640/r.width,(e.clientY-r.top)*640/r.height]};
+  cv.onpointerdown=e=>{e.preventDefault();cv.setPointerCapture(e.pointerId);drawing=true;dirty=true;const[x,y]=pt(e);cx.beginPath();cx.moveTo(x,y);cx.lineTo(x+.01,y);cx.stroke();cx.beginPath();cx.moveTo(x,y)};
+  cv.onpointermove=e=>{if(!drawing)return;e.preventDefault();const[x,y]=pt(e);cx.lineTo(x,y);cx.stroke();cx.beginPath();cx.moveTo(x,y)};
+  cv.onpointerup=cv.onpointercancel=()=>{drawing=false};
+}
+function clr(){cx.fillStyle='#fff';cx.fillRect(0,0,640,640);dirty=false}
+function snap(){const t=document.createElement('canvas');t.width=t.height=360;t.getContext('2d').drawImage(cv,0,0,360,360);return t.toDataURL('image/jpeg',.75)}
+function done(){
+  if(!dirty&&!confirm('還沒有寫字，確定完成這一題？'))return;
+  const s=D.cur;s.items[s.i].img=snap();s.i++;
+  if(s.i>=s.items.length){s.phase='mark';s.i=0}
+  save();render();
+}
+function marking(m,s){
+  const un=s.items.filter(x=>x.ok===null).length;
+  m.innerHTML=`<div class="bar"><h2>家長評分</h2><button class="b" onclick="cancel()">取消</button></div><div class="grid">`+
+  s.items.map((it,k)=>`<div class="card mk"><div class="han mid">${esc(it.c)}</div><div>${esc(it.w)} <small>${esc(it.wjp)}</small></div>${it.img?`<img src="${it.img}" alt="" onerror="this.replaceWith('圖片無法顯示')">`:'<div class="warn">沒有手寫圖片</div>'}<div class="row"><button class="b r ${it.ok===false?'on':''}" onclick="setOk(${k},false)">錯誤</button><button class="b p ${it.ok===true?'on':''}" onclick="setOk(${k},true)">正確</button></div></div>`).join('')+
+  `</div><div class="row"><button class="b p" ${un?'disabled':''} onclick="finish()">完成評分</button>${un?`<span class="warn">還有 ${un} 題未評分</span>`:''}</div>`;
+}
+function setOk(k,v){D.cur.items[k].ok=v;save();render()}
+function finish(){
+  const s=D.cur;if(!s||s.items.some(x=>x.ok===null))return;
+  const rec={id:s.id,levelId:s.levelId,levelName:lv(s.levelId)?lv(s.levelId).name:'',kind:s.kind,mode:s.mode,parentId:s.parentId,date:Date.now(),
+    items:s.items.map(({cid,c,jp,w,wjp,ok,img})=>({cid,c,jp,w,wjp,ok,img}))};
+  D.records.push(rec);D.cur=null;
+  if(!save()){D.records.pop();D.cur=s;return}
+  res=rec;inS=true;render();
+}
+function agg(rs){let t=0,o=0;rs.forEach(r=>r.items.forEach(x=>{t++;if(x.ok)o++}));return{t,o,p:t?Math.round(o/t*100):0}}
+function freq(rs){const m={};rs.forEach(r=>r.items.forEach(x=>{if(!x.ok)m[x.c]=(m[x.c]||0)+1}));return Object.entries(m).sort((a,b)=>b[1]-a[1]).slice(0,8)}
+function result(m){
+  const r=res,a=agg([r]),bad=r.items.filter(x=>!x.ok);
+  m.innerHTML=`<h2>${LB(r)}結果</h2><div class="card"><div class="line"><span>級別</span><b>${esc(r.levelName)}</b></div><div class="line"><span>類型</span><b>${LB(r)}</b></div><div class="line"><span>日期</span><b>${fd(r.date)}</b></div><div class="line"><span>題數</span><b>${a.t}</b></div><div class="line"><span>正確</span><b class="g">${a.o}</b></div><div class="line"><span>錯誤</span><b class="rd">${a.t-a.o}</b></div><div class="line"><span>準確率</span><b>${a.p}%</b></div></div>`+
+  (bad.length?`<div class="card"><h3>錯誤的字</h3><div class="han mid">${bad.map(x=>esc(x.c)).join(' ')}</div></div>`:'<p class="g"><b>全部正確！</b></p>')+
+  `<div class="row">${bad.length?`<button class="b p" onclick="revise()">重新溫習</button>`:''}<button class="b" onclick="go('${r.mode==='exam'?'exam':'practice'}')">返回</button></div>`;
+}
+function revise(){const r=res;mk(r.kind,r.levelId,'revision',r.items.filter(x=>!x.ok).map(x=>({id:x.cid,c:x.c,jp:x.jp,w:x.w,wjp:x.wjp})),r.id)}
+/* ---------- history ---------- */
+function vHist(m){
+  if(rid){const r=D.records.find(x=>x.id===rid);if(r){
+    m.innerHTML=`<button class="b" onclick="rid=null;render()">返回</button><h2>${LB(r)}・${esc(r.levelName)}</h2><p>${fd(r.date)}${r.parentId?'（溫習）':''}</p><div class="grid">`+r.items.map(x=>`<div class="card"><div class="han mid">${esc(x.c)}</div><div>${esc(x.w)}</div><b class="${x.ok?'g':'rd'}">${x.ok?'正確':'錯誤'}</b>${x.img?`<img src="${x.img}" alt="" onerror="this.replaceWith('圖片無法顯示')">`:''}</div>`).join('')+'</div>';return}}
+  const ids=[...new Set([...D.levels.map(l=>l.id),...D.records.map(r=>r.levelId)])];
+  m.innerHTML='<h2>學習紀錄</h2>'+(ids.map(id=>{
+    const rs=D.records.filter(r=>r.levelId===id),nm=lv(id)?lv(id).name:(rs[0]?rs[0].levelName:'');
+    const blocks=['read','write'].map(k=>{const kr=rs.filter(r=>r.kind===k),a=agg(kr),f=freq(kr);
+      return `<div class="card"><h4>${k==='read'?'讀字':'寫字'}　${a.t?a.o+' / '+a.t+'（'+a.p+'%）':'未有紀錄'}</h4>`+
+      ['practice','revision','exam'].map(md=>{const x=kr.filter(r=>r.mode===md),g=agg(x);return `<div class="line"><span>${NAME[k][md]}</span><span>${x.length} 次　${g.t?g.p+'%':'—'}</span></div>`}).join('')+
+      (f.length?`<p>常錯：${f.map(([c,n])=>`<span class="han">${esc(c)}</span>×${n}`).join('　')}</p>`:'')+'</div>'}).join('');
+    const list=rs.slice().reverse().slice(0,10).map(r=>{const a=agg([r]);return `<button class="b line" onclick="rid='${r.id}';render()"><span>${fd(r.date)}　${LB(r)}</span><span>${a.o}/${a.t}（${a.p}%）</span></button>`}).join('');
+    return `<h3>${esc(nm)}</h3><div class="grid">${blocks}</div>${list?`<div class="card">${list}</div>`:''}`}).join('')||'<p>還沒有紀錄。</p>');
+}
+/* ---------- settings: backup ---------- */
+function vSet(m){
+  m.innerHTML=`<h2>設定</h2><div class="card"><h3>匯出備份</h3><p><small>包括所有級別、字、紀錄和手寫圖片。</small></p><button class="b p" onclick="exp()">匯出</button></div>
+  <div class="card"><h3>匯入備份</h3><div class="row"><label><input type="radio" name="im" value="merge" checked style="width:auto;min-height:0"> 合併（保留現有資料）</label><label><input type="radio" name="im" value="replace" style="width:auto;min-height:0"> 取代全部資料</label></div><input type="file" id="fi" accept=".json,application/json"><div id="imsg" class="row"></div></div>`;
+  $('#fi').onchange=e=>{if(e.target.files[0])imp(e.target.files[0]);e.target.value=''};
+}
+function exp(){
+  const j={format:'cq-backup',version:1,exported:new Date().toISOString(),data:{levels:D.levels,records:D.records}};
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(j)],{type:'application/json'}));
+  a.download='識字備份-'+new Date().toISOString().slice(0,10)+'.json';document.body.appendChild(a);a.click();a.remove();
+}
+function valid(j){
+  if(!j||j.format!=='cq-backup')throw'這不是有效的備份檔';
+  if(j.version!==1)throw'不支援的備份版本';
+  const d=j.data;if(!d||!Array.isArray(d.levels)||!Array.isArray(d.records))throw'備份缺少級別或紀錄';
+  d.levels.forEach(l=>{if(!l.id||typeof l.name!=='string'||!Array.isArray(l.chars))throw'級別資料有誤';l.chars.forEach(c=>{if(!c.id||!c.c)throw'字資料有誤'})});
+  d.records.forEach(r=>{if(!r.id||!r.levelId||!Array.isArray(r.items))throw'紀錄資料有誤';r.items.forEach(x=>{if(x.img&&!/^data:image\//.test(x.img))throw'手寫圖片資料有誤'})});
+  return d;
+}
+async function imp(f){
+  const msg=$('#imsg'),mode=document.querySelector('input[name=im]:checked').value;let d;
+  try{d=valid(JSON.parse(await f.text()))}catch(e){msg.innerHTML=`<span class="warn">匯入失敗：${typeof e==='string'?e:'檔案已損毀或格式不正確'}。現有資料沒有改動。</span>`;return}
+  const old=JSON.stringify(D);
+  if(mode==='replace'){
+    if(!confirm('這會取代目前所有資料。建議先匯出目前的資料。確定要取代嗎？'))return;
+    D={levels:d.levels,records:d.records,cur:null};
+    if(!save()){D=JSON.parse(old);return}
+    msg.innerHTML='<span class="g">已取代全部資料。</span>';return;
+  }
+  let nl=0,nc=0,cf=0,nr=0;
+  d.levels.forEach(l=>{const e=lv(l.id);if(!e){D.levels.push(l);nl++;nc+=l.chars.length;return}
+    l.chars.forEach(c=>{const x=e.chars.find(y=>y.id===c.id);if(!x){e.chars.push(c);nc++}else if(x.c!==c.c||x.jp!==c.jp||x.w!==c.w)cf++})});
+  d.records.forEach(r=>{if(!D.records.some(x=>x.id===r.id)){D.records.push(r);nr++}});
+  if(!save()){D=JSON.parse(old);return}
+  msg.innerHTML=`<span class="g">已合併：新增級別 ${nl}、新增字 ${nc}、新增紀錄 ${nr}。</span>${cf?`<span class="warn">${cf} 個字的編號相同但內容不同，已保留現有版本。</span>`:''}`;
+}
+if(window.speechSynthesis)speechSynthesis.getVoices();
+render();
+</script></body></html>
