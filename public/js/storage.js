@@ -66,29 +66,41 @@
         return run(db, ['levels'], 'readwrite', (st) => {
           const keep = new Set(levels.map(l => l.id));
           st.getAllKeys().onsuccess = e => { e.target.result.forEach(k => { if (!keep.has(k)) st.delete(k); }); };
-          levels.forEach(l => st.put(l));
+          levels.forEach((l, i) => st.put({ ...l, ord: i }));   // `ord` keeps the user's level order
         });
       },
       /* Persist the unfinished session (and optionally one new image) atomically. */
       saveSession(session, image) {
-        return run(db, ['sessions', 'images'], 'readwrite', (ss, im) => { if (image) im.put(image); ss.put(session, 'current'); });
+        return run(db, ['sessions', 'images'], 'readwrite', (ss, im) => { if (image) im.put(image); ss.put(session, 'current'); ss.delete('draft'); });
       },
       /* Start a new session; if replacing an old (explicitly discarded) one, remove its images in the same transaction. */
       startSession(session, oldSid) {
         return run(db, ['sessions', 'images'], 'readwrite', (ss, im) => {
           if (oldSid) im.index('sid').getAllKeys(oldSid).onsuccess = e => e.target.result.forEach(k => im.delete(k));
-          ss.put(session, 'current');
+          ss.put(session, 'current'); ss.delete('draft');
         });
       },
       /* Finish: write the completed record and remove the unfinished session in ONE transaction. */
       completeSession(record) {
-        return run(db, ['records', 'sessions'], 'readwrite', (rc, ss) => { rc.put(record); ss.delete('current'); });
+        return run(db, ['records', 'sessions'], 'readwrite', (rc, ss) => { rc.put(record); ss.delete('current'); ss.delete('draft'); });
       },
       discardSession(sid) {
         return run(db, ['sessions', 'images'], 'readwrite', (ss, im) => {
-          ss.delete('current');
+          ss.delete('current'); ss.delete('draft');
           im.index('sid').getAllKeys(sid).onsuccess = e => e.target.result.forEach(k => im.delete(k));
         });
+      },
+      /* Handwriting draft of the question currently being written: { sid, qi, cid, seq, data|null }.
+         An older write (lower seq, same session+question) can never replace a newer one. */
+      saveDraft(d) {
+        return run(db, ['sessions'], 'readwrite', (ss) => {
+          const g = ss.get('draft');
+          g.onsuccess = () => { const o = g.result; if (!(o && o.sid === d.sid && o.qi === d.qi && o.seq > d.seq)) ss.put(d, 'draft'); };
+        });
+      },
+      getDraft() { return run(db, ['sessions'], 'readonly', (ss, out) => { ss.get('draft').onsuccess = e => { out.v = e.target.result || null; }; }); },
+      getImages(ids) {
+        return run(db, ['images'], 'readonly', (im, out) => { const o = out.v = {}; ids.forEach(id => { im.get(id).onsuccess = e => { if (e.target.result) o[id] = e.target.result.data; }; }); });
       },
       getImage(id) {
         return run(db, ['images'], 'readonly', (im, out) => { im.get(id).onsuccess = e => { out.v = e.target.result || null; }; });
@@ -97,13 +109,16 @@
       replaceAll({ levels, records, images }) {
         return run(db, ['levels', 'records', 'images', 'sessions'], 'readwrite', (lv, rc, im, ss) => {
           lv.clear(); rc.clear(); im.clear(); ss.clear();
-          levels.forEach(x => lv.put(x)); records.forEach(x => rc.put(x)); images.forEach(x => im.put(x));
+          levels.forEach((x, i) => lv.put({ ...x, ord: i })); records.forEach(x => rc.put(x)); images.forEach(x => im.put(x));
         });
       },
-      /* Merge: updated levels are written whole; records/images are only added if absent. */
-      applyMerge({ levels, records, images }) {
+      /* Merge: updated levels are written whole; new levels are appended after the existing ones;
+         records/images are only added if absent. */
+      applyMerge({ newLevels, updatedLevels, records, images }) {
         return run(db, ['levels', 'records', 'images'], 'readwrite', (lv, rc, im) => {
-          levels.forEach(x => lv.put(x)); records.forEach(x => putIfAbsent(rc, x)); images.forEach(x => putIfAbsent(im, x));
+          updatedLevels.forEach(x => lv.put(x));
+          lv.count().onsuccess = e => { newLevels.forEach((x, i) => lv.put({ ...x, ord: e.target.result + i })); };
+          records.forEach(x => putIfAbsent(rc, x)); images.forEach(x => putIfAbsent(im, x));
         });
       },
       exportAll() {
@@ -131,32 +146,44 @@
     });
     d.levels.forEach(l => { if (!l || !l.id || !Array.isArray(l.chars)) throw new StorageError('corrupt', 'Legacy level without id/chars'); });
     d.records.forEach(r => { if (!r || !r.id || !Array.isArray(r.items)) throw new StorageError('corrupt', 'Legacy record without id/items'); });
-    const levels = d.levels.map(l => ({ ...l }));
+    const levels = d.levels.map((l, i) => ({ ...l, ord: i }));
     const records = d.records.map(r => ({ ...r, items: conv(r.items, r.id) }));
     const session = d.cur && d.cur.id ? { ...d.cur, items: conv(d.cur.items, d.cur.id) } : null;
     return { levels, records, images, session };
   }
 
-  /* Compare what is in IndexedDB with what the legacy blob contained. Returns a list of problems (empty = verified). */
-  async function verifyMigration(store, conv, checkSession) {
+  /* ---- deterministic, field-level comparison (never just counts or presence) ---- */
+  function diffs(a, b, path, out) {
+    if (out.length >= 12) return;
+    if (a && b && typeof a === 'object' && typeof b === 'object') {
+      const arr = Array.isArray(a);
+      if (arr !== Array.isArray(b)) { out.push(path); return; }
+      new Set([...Object.keys(a), ...Object.keys(b)]).forEach(k => diffs(a[k], b[k], path + (arr ? '[' + k + ']' : '.' + k), out));
+    } else if (a !== b) out.push(path);
+  }
+  const PART_NAMES = { levels: '級別', records: '紀錄', images: '手寫圖片', session: '未完成的測驗' };
+
+  /* Compare EVERYTHING that was in the legacy blob with what is now in IndexedDB.
+     Returns { parts:Set, problems:[path...] }; empty problems = verified. */
+  async function verifyMigration(store, conv) {
     const all = await store.exportAll(), cur = (await store.loadAll()).session;
     const lv = new Map(all.levels.map(l => [l.id, l])), rc = new Map(all.records.map(r => [r.id, r])), im = new Map(all.images.map(i => [i.id, i]));
-    const bad = [];
-    conv.levels.forEach(l => { const x = lv.get(l.id); if (!x || x.chars.length < l.chars.length) bad.push('level ' + l.id); });
-    conv.records.forEach(r => { const x = rc.get(r.id); if (!x || x.items.length !== r.items.length) bad.push('record ' + r.id); });
-    conv.images.forEach(i => { const x = im.get(i.id); if (!x || x.data !== i.data) bad.push('image ' + i.id); });
-    if (checkSession && conv.session && !(cur && cur.id === conv.session.id)) {
-      const wasCompleted = rc.has(conv.session.id); // session may have been finished after migration
-      if (!wasCompleted) bad.push('session ' + conv.session.id);
-    }
-    return bad;
+    const problems = [], parts = new Set();
+    const check = (part, label, exp, act) => { const o = []; diffs(exp, act, label, o); if (o.length) { parts.add(part); problems.push(...o); } };
+    conv.levels.forEach(l => check('levels', 'levels[' + l.id + ']', l, lv.get(l.id)));      // names, ord, every character field, character order
+    conv.records.forEach(r => check('records', 'records[' + r.id + ']', r, rc.get(r.id)));   // type, level, dates, item ids/order/marks/fields
+    conv.images.forEach(i => check('images', 'images[' + i.id + ']', i, im.get(i.id)));      // full image content
+    if (conv.session) check('session', 'session', conv.session, cur);                         // id, order, index, answers, image refs
+    return { parts, problems };
   }
 
   /* Safe, re-runnable migration:
-     1. copy everything in ONE transaction (put-if-absent) and mark meta.migration='copied' in that same transaction;
-     2. verify by reading back;
-     3. only then delete the legacy localStorage key and mark 'done'.
-     A crash at any point leaves the legacy data intact; a re-run never overwrites newer IndexedDB data. */
+     1. copy everything in ONE transaction (put-if-absent: never overwrites existing IndexedDB data);
+     2. verify by reading back and comparing all content with the legacy data;
+     3. only then mark meta.migration='verified', remove the legacy key and mark 'done'.
+     Legacy data is never touched before step 3. A crash anywhere leaves it intact; re-running re-copies
+     (a no-op for data already there) and re-verifies. Once 'verified' is recorded the copy is never repeated,
+     so later IndexedDB edits are never overwritten. */
   async function migrateLegacy(store, ls) {
     let raw = null;
     try { raw = ls ? ls.getItem(LEGACY_KEY) : null; } catch (e) { raw = null; }
@@ -167,22 +194,26 @@
     try { legacy = JSON.parse(raw); conv = convertLegacy(legacy); }
     catch (e) { throw (e instanceof StorageError ? e : new StorageError('corrupt', 'Legacy data cannot be parsed', e)); }
 
-    if (!mig || mig.state !== 'copied') {
+    if (!mig || mig.state !== 'verified') {
       try {
-        await run(store.db, ['levels', 'records', 'images', 'sessions', 'meta'], 'readwrite', (lv, rc, im, ss, mt) => {
+        await run(store.db, ['levels', 'records', 'images', 'sessions'], 'readwrite', (lv, rc, im, ss) => {
           conv.levels.forEach(x => putIfAbsent(lv, x));
           conv.records.forEach(x => putIfAbsent(rc, x));
           conv.images.forEach(x => putIfAbsent(im, x));
           if (conv.session) { const g = ss.getKey('current'); g.onsuccess = () => { if (g.result === undefined) ss.put(conv.session, 'current'); }; }
-          mt.put({ state: 'copied', at: Date.now() }, 'migration');
         });
       } catch (e) { throw new StorageError('migration', 'Migration could not write to IndexedDB', e); }
+      let v;
+      try { v = await verifyMigration(store, conv); } catch (e) { throw new StorageError('migration', 'Migration verification failed to run', e); }
+      if (v.problems.length) {
+        const err = new StorageError('migration', 'Migration verification found differences: ' + v.problems.slice(0, 6).join(', '));
+        err.parts = [...v.parts].map(p => PART_NAMES[p]); err.problems = v.problems; throw err;
+      }
+      try { await store.setMeta('migration', { state: 'verified', at: Date.now() }); } catch (e) { throw new StorageError('migration', 'Migration could not record verification', e); }
     }
-    let bad;
-    try { bad = await verifyMigration(store, conv, !mig || mig.state !== 'copied'); } catch (e) { throw new StorageError('migration', 'Migration verification failed to run', e); }
-    if (bad.length) throw new StorageError('migration', 'Migration verification found problems: ' + bad.slice(0, 5).join(', '));
-    try { ls.removeItem(LEGACY_KEY); } catch (e) { /* harmless: state stays 'copied' and removal is retried next load */ }
-    await store.setMeta('migration', { state: 'done', at: Date.now() });
+    let removed = true;
+    try { ls.removeItem(LEGACY_KEY); } catch (e) { removed = false; }
+    if (removed) await store.setMeta('migration', { state: 'done', at: Date.now() });
     return { status: 'migrated', levels: conv.levels.length, records: conv.records.length, images: conv.images.length };
   }
 

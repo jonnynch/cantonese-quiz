@@ -10,11 +10,14 @@ function toast(t) { let e = $('#toast'); if (!e) { e = document.createElement('d
 const reason = e => !e ? '' : e.code === 'quota' ? '儲存空間不足' : e.code === 'unavailable' ? '無法使用儲存空間' : '寫入時發生錯誤';
 
 /* ---------- save error banner ---------- */
-function showSaveError(what, e) {
+function showBar(html, retry) {
   let b = $('#errbar'); if (!b) { b = document.createElement('div'); b.id = 'errbar'; document.body.appendChild(b); }
-  b.innerHTML = `<div><b>${esc(what)}沒有儲存成功。</b>（${esc(reason(e))}）你的作答仍然保留在畫面上，請按「重試」。</div><div class="row"><button class="b p" onclick="retrySave()">重試</button><button class="b" onclick="hideErr()">關閉</button></div>`;
+  b.innerHTML = `<div>${html}</div><div class="row"><button class="b p" onclick="${retry}()">重試</button><button class="b" onclick="hideErr()">關閉</button></div>`;
   b.hidden = false;
 }
+function showSaveError(what, e) { showBar(`<b>${esc(what)}沒有儲存成功。</b>（${esc(reason(e))}）你的作答仍然保留在畫面上，請按「重試」。`, 'retrySave'); }
+function showDraftError(e) { showBar(`<b>筆跡未能自動儲存。</b>（${esc(reason(e))}）畫面上的筆跡仍然保留，請按「重試」。儲存成功之前，這一題不能完成。`, 'retryDraft'); }
+function retryDraft() { Q.flushDraft().then(hideErr, () => { }); }
 function hideErr() { const b = $('#errbar'); if (b) b.hidden = true; }
 let lastWhat = '';
 function after(r, what) {   // r = result of a Quiz action
@@ -36,8 +39,14 @@ function hydrate(root) {
     try { const r = await store.getImage(im.dataset.img); if (r) im.src = r.data; else im.replaceWith('圖片無法顯示'); } catch (e) { im.replaceWith('圖片無法顯示'); }
   });
 }
-function go(t) {
-  if (inS && dirty && !confirm('這一題的筆跡還沒有儲存，離開後不會保留。已完成的題目會保留，可以稍後繼續。確定離開？')) return;
+/* Leaving a writing question: make sure the drawing is saved first; if that is impossible, ask before discarding it. */
+async function safeToLeave() {
+  if (!inS || !dirty) return true;
+  try { await Q.flushDraft(); return true; }
+  catch (e) { return confirm('筆跡未能儲存，離開後這一題的筆跡會遺失。確定離開？'); }
+}
+async function go(t) {
+  if (!(await safeToLeave())) return;
   hideErr(); inS = false; res = null; tab = t; lid = null; rid = null; dirty = false; render();
 }
 /* ---------- forms ---------- */
@@ -114,9 +123,9 @@ function sess(m) {
     `<canvas id="cv" width="640" height="640"></canvas><div class="row"><button class="b" onclick="clr()">清除</button><button class="b" onclick="clr()">重寫</button><button class="b p" onclick="done()">${s.i + 1 < n ? '下一題' : '完成'}</button></div></div>`;
   initCv();
 }
-function leave() {
-  if (dirty && !confirm('這一題的筆跡還沒有儲存，離開後不會保留。已完成的題目會保留，可以稍後繼續。確定離開？')) return;
-  hideErr(); inS = false; dirty = false; render(); toast('進度已保留，可以稍後繼續');
+async function leave() {
+  if (!(await safeToLeave())) return;
+  hideErr(); inS = false; dirty = false; render(); toast('進度和筆跡已保留，可以稍後繼續');
 }
 async function mark(ok) { after(await Q.answerRead(ok), '這一題的答案'); }
 function say(k) { const it = Q.cur.items[Q.cur.i]; speak(k === 'w' ? it.w : it.c); }
@@ -132,9 +141,19 @@ function initCv() {
   const pt = e => { const r = cv.getBoundingClientRect(); return [(e.clientX - r.left) * 640 / r.width, (e.clientY - r.top) * 640 / r.height]; };
   cv.onpointerdown = e => { e.preventDefault(); cv.setPointerCapture(e.pointerId); drawing = true; dirty = true; const [x, y] = pt(e); cx.beginPath(); cx.moveTo(x, y); cx.lineTo(x + .01, y); cx.stroke(); cx.beginPath(); cx.moveTo(x, y); };
   cv.onpointermove = e => { if (!drawing) return; e.preventDefault(); const [x, y] = pt(e); cx.lineTo(x, y); cx.stroke(); cx.beginPath(); cx.moveTo(x, y); };
-  cv.onpointerup = cv.onpointercancel = () => { drawing = false; };
+  cv.onpointerup = cv.onpointercancel = () => { if (!drawing) return; drawing = false; Q.scheduleDraft(draftData); };
+  restoreDraft();
 }
-function clr() { cx.fillStyle = '#fff'; cx.fillRect(0, 0, 640, 640); dirty = false; }
+const draftData = () => (dirty ? snap() : null);   // evaluated when the autosave actually runs
+function clr(silent) { cx.fillStyle = '#fff'; cx.fillRect(0, 0, 640, 640); dirty = false; if (silent !== true) Q.scheduleDraft(draftData, { immediate: true }); }
+async function restoreDraft() {
+  const s = Q.cur; if (!s) return; const sid = s.id, i = s.i, c = cv; let d;
+  try { d = await Q.loadDraft(); } catch (e) { return; }
+  if (!d || !d.data || dirty || !Q.cur || Q.cur.id !== sid || Q.cur.i !== i || cv !== c) return;
+  const img = new Image();
+  img.onload = () => { if (dirty || cv !== c) return; cx.drawImage(img, 0, 0, 640, 640); dirty = true; };
+  img.src = d.data;
+}
 function snap() { const t = document.createElement('canvas'); t.width = t.height = 360; t.getContext('2d').drawImage(cv, 0, 0, 360, 360); return t.toDataURL('image/jpeg', .75); }
 async function done() {
   if (Q.busy) return;
@@ -202,6 +221,7 @@ async function imp(f) {
     msg.innerHTML = e.list ? `<p class="warn">匯入失敗，現有資料沒有改動：</p><ul class="warn">${list(e.list, 10)}</ul>` : `<p class="warn">匯入失敗（${esc(reason(e))}）。現有資料沒有改動。</p>`; return;
   }
   if (r.cancelled) return;
+  if (r.aborted) { msg.innerHTML = `<p class="warn">沒有匯入任何資料：發現 ${r.conflicts.length} 項衝突，現有資料沒有改動。</p><ul class="warn">${list(r.conflicts, 10)}</ul><p><small>如要使用備份的內容，請先匯出目前的資料，再選擇「取代全部資料」。</small></p>`; return; }
   msg.innerHTML = `<p class="g">${r.mode === 'replace' ? '已取代全部資料' : '已合併'}：新增級別 ${r.added.levels}、新增字 ${r.added.chars}、新增紀錄 ${r.added.records}${r.identical ? `；${r.identical} 項資料已存在（相同），已略過` : ''}。</p>` +
     (r.conflicts.length ? `<p class="warn">發現 ${r.conflicts.length} 項衝突，沒有覆蓋現有資料：</p><ul class="warn">${list(r.conflicts, 10)}</ul>` : '') +
     (r.warnings.length ? `<ul class="warn">${list(r.warnings, 10)}</ul>` : '');
@@ -218,8 +238,11 @@ async function boot() {
   try { store = CQStorage.createStore(await CQStorage.openDb(window.indexedDB)); }
   catch (e) { return fatal('無法使用儲存空間', '這個瀏覽器目前無法使用儲存空間（IndexedDB），所以不能儲存資料。請不要使用私密瀏覽，或換一個瀏覽器再試。'); }
   try { await CQStorage.migrateLegacy(store, window.localStorage); }
-  catch (e) { return fatal('資料轉移未能完成', '原有的資料沒有被刪除，也沒有改動。請按「重試」。如果仍然失敗，請先下載原有資料作備份。', true); }
-  Q = new CQCore.Quiz(store);
+  catch (e) { return fatal('資料轉移未能完成', (e.parts && e.parts.length ? '核對時發現以下部分不相符：' + esc(e.parts.join('、')) + '。' : '') + '原有的資料沒有被刪除，也沒有改動。請按「重試」。如果仍然失敗，請先下載原有資料作備份。', true); }
+  Q = new CQCore.Quiz(store); Q.onDraftError = showDraftError; Q.onDraftOk = hideErr;
+  const flushNow = () => { if (Q.cur) Q.flushDraft().catch(() => { }); };
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushNow(); });
+  window.addEventListener('pagehide', flushNow);
   try { await Q.init(); } catch (e) { return fatal('無法讀取資料', '資料沒有被改動。請按「重試」。'); }
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => { });
   if (Q.cur) { tab = Q.cur.mode === 'exam' ? 'exam' : 'practice'; toast('有未完成的測驗，可以繼續或放棄'); }
