@@ -217,5 +217,17 @@
     return { status: 'migrated', levels: conv.levels.length, records: conv.records.length, images: conv.images.length };
   }
 
-  return { DB_NAME, LEGACY_KEY, StorageError, openDb, createStore, migrateLegacy, convertLegacy };
+  /* Mark a database as belonging to exactly one learner profile (set once, then verified on every open),
+     so a store for profile A can never be attached to the data of profile B. */
+  async function claimOwner(store, pid) {
+    let cur = await store.getMeta('owner');
+    if (cur === undefined) {
+      await run(store.db, ['meta'], 'readwrite', (m) => { const g = m.getKey('owner'); g.onsuccess = () => { if (g.result === undefined) m.put(pid, 'owner'); }; });
+      cur = await store.getMeta('owner');
+    }
+    if (cur !== pid) throw new StorageError('owner', 'This database belongs to a different learner profile');
+    store.pid = pid; return store;
+  }
+
+  return { DB_NAME, LEGACY_KEY, StorageError, wrap, run, openDb, createStore, claimOwner, migrateLegacy, convertLegacy };
 });
