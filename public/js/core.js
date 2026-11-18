@@ -72,7 +72,7 @@
         items.push({ cid: x.cid, c: x.c, jp: str(x.jp), w: str(x.w), wjp: str(x.wjp), ok: x.ok, img: x.img || null });
       });
       if (ok) records.push({ id: r.id, levelId: r.levelId, levelName: str(r.levelName), kind: r.kind, mode: r.mode,
-        parentId: r.parentId || null, date: r.date, items });
+        parentId: r.parentId || null, ...(Number.isFinite(r.started) ? { started: r.started } : {}), date: r.date, items });
     });
     if (errs.length) { if (errs.more) errs.push('還有更多錯誤未列出'); throw new ImportError(errs); }
     return { levels, records };
@@ -104,13 +104,14 @@
   }
   /* Both sides normalised to the same shape, with handwriting as its full image content. */
   function normRecord(r, imgs) {
-    return { levelId: r.levelId, levelName: str(r.levelName), kind: r.kind, mode: r.mode, parentId: r.parentId || null, date: r.date,
+    return { levelId: r.levelId, levelName: str(r.levelName), kind: r.kind, mode: r.mode, parentId: r.parentId || null, date: r.date, started: Number.isFinite(r.started) ? r.started : null,
       items: r.items.map(x => ({ cid: x.cid, c: x.c, jp: str(x.jp), w: str(x.w), wjp: str(x.wjp), ok: x.ok,
         img: x.img || (x.imgId ? (imgs && imgs[x.imgId]) || ('<missing:' + x.imgId + '>') : null) })) };
   }
   function recordDiffs(a, b) {   // a = existing, b = incoming (both normalised)
     const o = [];
     [['levelId', '級別'], ['levelName', '級別名稱'], ['kind', '類型'], ['mode', '模式'], ['parentId', '溫習來源'], ['date', '日期']].forEach(([k, n]) => { if (a[k] !== b[k]) o.push(n + '不同'); });
+    if (a.started != null && b.started != null && a.started !== b.started) o.push('開始時間不同');
     if (a.items.length !== b.items.length) o.push('題目數量不同（現有 ' + a.items.length + '／備份 ' + b.items.length + '）');
     for (let k = 0; k < Math.min(a.items.length, b.items.length); k++) {
       const x = a.items[k], y = b.items[k], n = '第 ' + (k + 1) + ' 題';
@@ -166,8 +167,30 @@
     return P;
   }
 
+  /* Elapsed wall-clock time between the stored start and completion timestamps, in Traditional Chinese.
+     Returns null (= unavailable) for missing/invalid timestamps or a completion earlier than the start: never invented, never negative. */
+  function formatDuration(started, completed) {
+    if (!Number.isFinite(started) || !Number.isFinite(completed) || completed < started) return null;
+    const t = Math.floor((completed - started) / 1000), m = Math.floor(t / 60), sec = t % 60;
+    return m ? m + ' 分 ' + sec + ' 秒' : sec + ' 秒';
+  }
+  const durationOf = r => formatDuration(r && r.started, r && r.date);
+
+  /* ---- writing correction: write each wrongly written character five times ---- */
+  const ATTEMPTS = 5, CORRECTION_MODES = ['practice', 'revision', 'exam'];
+  const attemptsDone = it => it.attempts.length === ATTEMPTS && it.attempts.every(Boolean) && new Set(it.attempts).size === ATTEMPTS;   // five distinct saved images
+  function buildCorrection(rec, now) {
+    if (rec.kind !== 'write' || !CORRECTION_MODES.includes(rec.mode)) return null;
+    const bad = rec.items.filter(x => x.ok === false);                     // final parent markings
+    if (!bad.length) return null;
+    return { id: 'corr-' + rec.id, sourceId: rec.id, sourceKind: rec.kind, sourceMode: rec.mode, levelId: rec.levelId, levelName: rec.levelName || '',
+      createdAt: now, completedAt: null, state: 'open',
+      items: bad.map(x => ({ cid: x.cid, c: x.c, jp: x.jp || '', w: x.w || '', wjp: x.wjp || '', attempts: Array(ATTEMPTS).fill(null) })) };
+  }
+
   function buildRecord(s, now) {
-    return { id: s.id, levelId: s.levelId, levelName: s.levelName || '', kind: s.kind, mode: s.mode, parentId: s.parentId || null, date: now,
+    return { id: s.id, levelId: s.levelId, levelName: s.levelName || '', kind: s.kind, mode: s.mode, parentId: s.parentId || null,
+      ...(Number.isFinite(s.started) ? { started: s.started } : {}), date: now,   // started = real session start, date = completion time
       items: s.items.map(({ cid, c, jp, w, wjp, ok, imgId }) => ({ cid, c, jp, w, wjp, ok, imgId: imgId || null })) };
   }
 
@@ -180,11 +203,11 @@
       this.levels = []; this.records = []; this.cur = null; this.busy = false; this.retry = null; this.result = null;
       this.draftDelay = o.draftDelay == null ? 400 : o.draftDelay;
       this.onDraftError = null; this.onDraftOk = null; this.draftError = null;
-      this._pend = null; this._timer = null; this._flushing = null; this._flushRunning = false; this.closed = false; this._lastAct = Promise.resolve(); this._seq = Date.now() * 1000;
+      this._pend = null; this._timer = null; this._flushing = null; this._flushRunning = false; this.closed = false; this._lastAct = Promise.resolve(); this._cq = Promise.resolve(); this.corrections = []; this._seq = Date.now() * 1000;
     }
     async init() { this._set(await this.store.loadAll()); }
     _set(d) {
-      this.levels = sortLevels(d.levels); this.records = d.records.slice().sort((a, b) => (a.date || 0) - (b.date || 0)); this.cur = d.session || null;
+      this.levels = sortLevels(d.levels); this.records = d.records.slice().sort((a, b) => (a.date || 0) - (b.date || 0)); this.cur = d.session || null; this.corrections = (d.corrections || []).slice().sort((a, b) => a.createdAt - b.createdAt);
     }
     level(id) { return this.levels.find(l => l.id === id); }
 
@@ -205,7 +228,7 @@
     async close() {
       let error = null;
       try { await this.flushDraft(); } catch (e) { error = e; }
-      await this._lastAct;
+      await this._lastAct; await this._cq;
       this._dropDraft(); this.closed = true;
       return error ? { ok: false, error } : { ok: true };
     }
@@ -303,15 +326,49 @@
       });
     }
     async _complete(s) {
-      const rec = buildRecord(s, this.now());
-      await this.store.completeSession(rec);       // record written + session removed atomically
-      this.records.push(rec); this._dropDraft(); this.cur = null; this.result = rec;
+      const rec = buildRecord(s, this.now()), corr = buildCorrection(rec, this.now());
+      await this.store.completeSession(rec, corr);   // record + (optional) correction written and session removed atomically
+      this.records.push(rec); if (corr) this.corrections.push(corr); this._dropDraft(); this.cur = null; this.result = rec;
     }
     discard(confirm) {
       if (!this.cur) return Promise.resolve({ ok: true });
       if (!(confirm && confirm('確定放棄這次未完成的測驗？已作答的內容會被刪除。'))) return Promise.resolve({ ok: false, cancelled: true });
       const sid = this.cur.id;
       return this._act(async () => { await this.store.discardSession(sid); this._dropDraft(); this.cur = null; });
+    }
+
+    /* writing-correction activities (separate from the records they came from; never change any score) */
+    correction(id) { return this.corrections.find(c => c.id === id) || null; }
+    correctionFor(recordId) { return this.correction('corr-' + recordId); }
+    openCorrections() { return this.corrections.filter(c => c.state === 'open'); }
+    /* Attempts for different canvases arrive close together, so these run strictly one after another (read-modify-write never interleaves). */
+    _serial(fn) {
+      const run = this._cq.then(async () => {
+        if (this.closed) return { ok: false, error: new Error('This learner session is closed') };
+        try { await fn(); return { ok: true }; } catch (e) { return { ok: false, error: e }; }
+      });
+      this._cq = run.then(() => { }, () => { }); return run;
+    }
+    /* data = image of one attempt, or null to clear it. Saved (image + activity, one transaction) before the in-memory state changes. */
+    saveAttempt(corrId, ci, ai, data) {
+      const imgId = data ? 'cimg-' + this.uid() : null;
+      return this._serial(async () => {
+        const c = this.correction(corrId); if (!c || c.state !== 'open') throw new Error('Correction activity is not open');
+        if (!c.items[ci] || !Number.isInteger(ai) || ai < 0 || ai >= ATTEMPTS) throw new Error('No such attempt');
+        if (data != null && !(typeof data === 'string' && /^data:image\//.test(data))) throw new Error('Invalid handwriting image');
+        const n = clone(c), old = n.items[ci].attempts[ai]; n.items[ci].attempts[ai] = imgId;
+        await this.store.saveCorrection(n, data ? { id: imgId, sid: c.id, data } : null, old);
+        this.corrections = this.corrections.map(x => (x.id === corrId ? n : x));
+      });
+    }
+    completeCorrection(corrId) {
+      return this._serial(async () => {
+        const c = this.correction(corrId); if (!c || c.state !== 'open') throw new Error('Correction activity is not open');
+        if (!c.items.every(attemptsDone)) throw new Error('Not every character has five saved attempts');
+        const n = clone(c); n.state = 'done'; n.completedAt = this.now();
+        await this.store.saveCorrection(n, null, null);
+        this.corrections = this.corrections.map(x => (x.id === corrId ? n : x));
+      });
     }
 
     /* backup */
@@ -352,5 +409,5 @@
     }
   }
 
-  return { Quiz, ImportError, validateBackup, planMerge, splitImages, buildRecord, shuf, clone };
+  return { Quiz, ImportError, validateBackup, planMerge, splitImages, buildRecord, buildCorrection, attemptsDone, formatDuration, durationOf, ATTEMPTS, shuf, clone };
 });

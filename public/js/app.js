@@ -1,4 +1,5 @@
 /* UI layer. All persistence goes through CQCore.Quiz -> CQStorage (IndexedDB). */
+let corrId = null, corrIdx = 0, corrSum = false, cs = [], cTimers = {}, cFail = new Set(), autoKey = null, speechUnlocked = false;
 let Q, store, mgr, profile = null, pview = 'pick', tab = 'levels', lid = null, rid = null, inS = false, res = null, cv, cx, drawing = false, dirty = false;
 const $ = s => document.querySelector(s);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -25,7 +26,7 @@ function after(r, what, q) {   // r = result of a Quiz action; q = the Quiz (lea
   if (!r.ok) { lastWhat = what; showSaveError(what, r.error); return; }
   hideErr();
   if (Q.result) { res = Q.result; Q.result = null; inS = true; }
-  render();
+  render(); autoSpeak();
 }
 async function retrySave() { const q = Q; if (q.busy) return; after(await q.retryLast(), lastWhat, q); }
 
@@ -33,7 +34,8 @@ const AV = a => (CQProfiles.AVATAR_EMOJI[a] || '🙂');
 function render() {
   if (!Q) { $('#nav').innerHTML = ''; (pview === 'manage' ? vManage : vPickProfile)($('#main')); return; }
   $('#nav').innerHTML = `<button class="who" onclick="switchLearner()" aria-label="切換學習者"><span class="av1">${AV(profile.avatar)}</span> ${esc(profile.name)} <small>切換學習者</small></button>` + [['levels', '級別管理'], ['practice', '練習'], ['exam', '考試'], ['hist', '學習紀錄'], ['set', '設定']].map(([k, t]) => `<button class="${tab === k && !inS ? 'on' : ''}" onclick="go('${k}')">${t}</button>`).join('');
-  const m = $('#main'); if (inS) { sess(m); hydrate(m); return; }
+  const m = $('#main'); if (corrId) { vCorrection(m); return; }
+  if (inS) { sess(m); hydrate(m); return; }
   ({ levels: vLevels, practice: vPick, exam: vPick, hist: vHist, set: vSet })[tab](m); hydrate(m);
 }
 function hydrate(root) {
@@ -44,13 +46,14 @@ function hydrate(root) {
 }
 /* Leaving a writing question: make sure the drawing is saved first; if that is impossible, ask before discarding it. */
 async function safeToLeave() {
+  if (corrId) { await flushCorr(); return !cFail.size || confirm('有筆跡未能儲存，離開後這些筆跡會遺失。確定離開？'); }
   if (!inS || !dirty) return true;
   try { await Q.flushDraft(); return true; }
   catch (e) { return confirm('筆跡未能儲存，離開後這一題的筆跡會遺失。確定離開？'); }
 }
 async function go(t) {
   if (!(await safeToLeave())) return;
-  hideErr(); inS = false; res = null; tab = t; lid = null; rid = null; dirty = false; render();
+  hideErr(); inS = false; res = null; corrId = null; corrSum = false; tab = t; lid = null; rid = null; dirty = false; render();
 }
 /* ---------- forms ---------- */
 function form(title, fields, vals, cb) {
@@ -99,6 +102,7 @@ async function delChar(id) {
 function vPick(m) {
   const ex = tab === 'exam', md = ex ? 'exam' : 'practice', lab = ex ? ['讀字考試', '寫字考試'] : ['讀字練習', '聽音寫字']; let h = '';
   if (Q.cur) { const s = Q.cur; h += `<div class="card"><b>有未完成的${LB(s)}</b>（${esc(s.levelName)}，${s.phase === 'mark' ? '評分中' : '第 ' + (s.i + 1) + ' / ' + s.items.length + ' 題'}）<div class="row"><button class="b p" onclick="resume()">繼續</button><button class="b r" onclick="discard()">放棄</button></div></div>`; }
+  Q.openCorrections().forEach(c => { const n = c.items.reduce((t, x) => t + x.attempts.filter(Boolean).length, 0); h += `<div class="card"><b>有未完成的寫五次練習</b>（${esc(c.levelName)}，${c.items.length} 個字，${n} / ${c.items.length * 5}）<div class="row"><button class="b p" onclick="openCorrection('${c.id}')">繼續</button></div></div>`; });
   h += Q.levels.map(L => { const n = L.chars.length, low = ex && n < 20, ok = n && !low;
     return `<div class="card"><h3>${esc(L.name)} <small>${n} 字</small></h3>${low ? '<div class="warn">需要至少 20 個字才可以考試。</div>' : ''}<div class="row"><button class="b p" ${ok ? '' : 'disabled'} onclick="start('read','${L.id}','${md}')">${lab[0]}</button><button class="b p" ${ok ? '' : 'disabled'} onclick="start('write','${L.id}','${md}')">${lab[1]}</button></div></div>`; }).join('') || '<p>請先到「級別管理」新增級別和字。</p>';
   m.innerHTML = `<h2>${ex ? '考試' : '練習'}</h2>` + h;
@@ -106,10 +110,11 @@ function vPick(m) {
 function resume() { inS = true; res = null; dirty = false; render(); }
 async function discard() { const q = Q, r = await q.discard(confirm); if (q !== Q || r.busy || r.cancelled) return; if (!r.ok) { alert('放棄失敗（' + reason(r.error) + '），未完成的測驗仍然保留。'); return; } render(); }
 async function start(kind, levelId, mode) {
+  unlockSpeech();
   const q = Q, r = await q.startSession({ kind, levelId, mode, confirm: m => confirm(m) });
   if (q !== Q || r.cancelled || r.busy) return;
   if (!r.ok) { alert('無法開始測驗（' + (reason(r.error) || r.error.message) + '）。'); return; }
-  inS = true; res = null; dirty = false; render();
+  inS = true; res = null; dirty = false; render(); autoSpeak();
 }
 /* ---------- session ---------- */
 function sess(m) {
@@ -123,7 +128,7 @@ function sess(m) {
   }
   m.innerHTML = head + `<div class="stage"><div class="row"><button class="b spk" onclick="say('w')" ${it.w ? '' : 'disabled'} aria-label="詞語發音">🔊 詞語</button><button class="b spk" onclick="say('c')" aria-label="單字發音">🔊 單字</button></div>` +
     (s.mode === 'exam' ? '' : `<div class="row"><button class="b" id="rv" onclick="rev()">顯示答案</button><span id="ans" class="han ans"></span></div>`) +
-    `<canvas id="cv" width="640" height="640"></canvas><div class="row"><button class="b" onclick="clr()">清除</button><button class="b" onclick="clr()">重寫</button><button class="b p" onclick="done()">${s.i + 1 < n ? '下一題' : '完成'}</button></div></div>`;
+    `<canvas id="cv" width="640" height="640"></canvas><div class="row"><button class="b" id="clrbtn" onclick="clr()">清除</button><button class="b p" onclick="done()">${s.i + 1 < n ? '下一題' : '完成'}</button></div></div>`;
   initCv();
 }
 async function leave() {
@@ -132,11 +137,24 @@ async function leave() {
 }
 async function mark(ok) { const q = Q; after(await q.answerRead(ok), '這一題的答案', q); }
 function say(k) { const it = Q.cur.items[Q.cur.i]; speak(k === 'w' ? it.w : it.c); }
-function speak(t) {
-  if (!t) return; const ss = window.speechSynthesis; if (!ss || !window.SpeechSynthesisUtterance) { toast('這部裝置不支援語音'); return; }
-  const v = ss.getVoices().find(x => /zh[-_]HK|yue/i.test(x.lang));
-  if (!v) toast('找不到廣東話語音，發音可能不準確');
-  ss.cancel(); const u = new SpeechSynthesisUtterance(t); u.lang = 'zh-HK'; if (v) u.voice = v; u.rate = .8; ss.speak(u);
+function speak(t, quiet) {   // quiet = automatic speech: never show messages, never throw
+  if (!t) return; const ss = window.speechSynthesis; if (!ss || !window.SpeechSynthesisUtterance) { if (!quiet) toast('這部裝置不支援語音'); return; }
+  try {
+    const v = ss.getVoices().find(x => /zh[-_]HK|yue/i.test(x.lang));
+    if (!v && !quiet) toast('找不到廣東話語音，發音可能不準確');
+    ss.cancel(); const u = new SpeechSynthesisUtterance(t); u.lang = 'zh-HK'; if (v) u.voice = v; u.rate = .8; ss.speak(u);   // cancel() first: never two voices at once
+  } catch (e) { if (!quiet) toast('無法播放語音'); }
+}
+/* iOS only allows speech that was started from a tap: prime it synchronously inside the tap handler, before any await. */
+function unlockSpeech() {
+  try { const ss = window.speechSynthesis; if (!speechUnlocked && ss && window.SpeechSynthesisUtterance) { const u = new SpeechSynthesisUtterance(''); u.volume = 0; ss.speak(u); speechUnlocked = true; } } catch (e) { }
+}
+/* Pronounce the isolated target character once per question (never the compound word). Called only when a question is newly entered
+   (session start / after an answer advanced), never from render or resume, and remembered per session+question. */
+function autoSpeak() {
+  const s = Q && Q.cur; if (!s || s.kind !== 'write' || s.phase !== 'ask' || corrId) return;
+  const key = s.id + ':' + s.i; if (autoKey === key) return; autoKey = key;
+  speak(s.items[s.i].c, true);
 }
 function rev() { const a = $('#ans'), b = $('#rv'); if (a.textContent) { a.textContent = ''; b.textContent = '顯示答案'; } else { a.textContent = Q.cur.items[Q.cur.i].c; b.textContent = '隱藏答案'; } }
 function initCv() {
@@ -159,7 +177,7 @@ async function restoreDraft() {
 }
 function snap() { const t = document.createElement('canvas'); t.width = t.height = 360; t.getContext('2d').drawImage(cv, 0, 0, 360, 360); return t.toDataURL('image/jpeg', .75); }
 async function done() {
-  const q = Q; if (q.busy) return;
+  const q = Q; if (q.busy) return; unlockSpeech();
   if (!dirty && !confirm('還沒有寫字，確定完成這一題？')) return;
   const r = await q.answerWrite(snap());   // canvas is NOT cleared; it is only replaced after a confirmed save
   if (q !== Q) return;
@@ -176,21 +194,27 @@ async function setOk(k, v) { const q = Q; after(await q.setOk(k, v), '評分', q
 async function finish() { const q = Q; after(await q.finishMarking(), '評分結果', q); }
 function agg(rs) { let t = 0, o = 0; rs.forEach(r => r.items.forEach(x => { t++; if (x.ok) o++; })); return { t, o, p: t ? Math.round(o / t * 100) : 0 }; }
 function freq(rs) { const m = {}; rs.forEach(r => r.items.forEach(x => { if (!x.ok) m[x.c] = (m[x.c] || 0) + 1; })); return Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 8); }
+const durText = r => CQCore.durationOf(r) || '未有資料';
+function corrButton(r) {
+  const c = Q.correctionFor(r.id); if (!c) return '';
+  return c.state === 'done' ? '<span class="g"><b>已完成寫五次練習</b></span>' : `<button class="b p" onclick="openCorrection('${c.id}')">寫五次練習（${c.items.length} 個字）</button>`;
+}
 function result(m) {
   const r = res, a = agg([r]), bad = r.items.filter(x => !x.ok);
-  m.innerHTML = `<h2>${LB(r)}結果</h2><div class="card"><div class="line"><span>級別</span><b>${esc(r.levelName)}</b></div><div class="line"><span>類型</span><b>${LB(r)}</b></div><div class="line"><span>日期</span><b>${fd(r.date)}</b></div><div class="line"><span>題數</span><b>${a.t}</b></div><div class="line"><span>正確</span><b class="g">${a.o}</b></div><div class="line"><span>錯誤</span><b class="rd">${a.t - a.o}</b></div><div class="line"><span>準確率</span><b>${a.p}%</b></div></div>` +
+  m.innerHTML = `<h2>${LB(r)}結果</h2><div class="card"><div class="line"><span>級別</span><b>${esc(r.levelName)}</b></div><div class="line"><span>類型</span><b>${LB(r)}</b></div><div class="line"><span>用時</span><b>${durText(r)}</b></div><div class="line"><span>題數</span><b>${a.t}</b></div><div class="line"><span>正確</span><b class="g">${a.o}</b></div><div class="line"><span>錯誤</span><b class="rd">${a.t - a.o}</b></div><div class="line"><span>準確率</span><b>${a.p}%</b></div></div>` +
     (bad.length ? `<div class="card"><h3>錯誤的字</h3><div class="han mid">${bad.map(x => esc(x.c)).join(' ')}</div></div>` : '<p class="g"><b>全部正確！</b></p>') +
-    `<div class="row">${bad.length ? `<button class="b p" onclick="revise()">重新溫習</button>` : ''}<button class="b" onclick="go('${r.mode === 'exam' ? 'exam' : 'practice'}')">返回</button></div>`;
+    `<div class="row">${corrButton(r)}${bad.length ? `<button class="b p" onclick="revise()">重新溫習</button>` : ''}<button class="b" onclick="go('${r.mode === 'exam' ? 'exam' : 'practice'}')">返回</button></div>`;
 }
 async function revise() {
+  unlockSpeech();
   const q = Q, r = res, rr = await q.startSession({ kind: r.kind, levelId: r.levelId, mode: 'revision', parentId: r.id, chars: r.items.filter(x => !x.ok).map(x => ({ id: x.cid, c: x.c, jp: x.jp, w: x.w, wjp: x.wjp })), confirm: m => confirm(m) });
   if (q !== Q || rr.cancelled || rr.busy) return; if (!rr.ok) { alert('無法開始溫習（' + reason(rr.error) + '）。'); return; }
-  res = null; inS = true; dirty = false; render();
+  res = null; inS = true; dirty = false; render(); autoSpeak();
 }
 /* ---------- history ---------- */
 function vHist(m) {
   if (rid) { const r = Q.records.find(x => x.id === rid); if (r) {
-    m.innerHTML = `<button class="b" onclick="rid=null;render()">返回</button><h2>${LB(r)}・${esc(r.levelName)}</h2><p>${fd(r.date)}${r.parentId ? '（溫習）' : ''}</p><div class="grid">` + r.items.map(x => `<div class="card"><div class="han mid">${esc(x.c)}</div><div>${esc(x.w)}</div><b class="${x.ok ? 'g' : 'rd'}">${x.ok ? '正確' : '錯誤'}</b>${x.imgId ? `<img data-img="${esc(x.imgId)}" alt="">` : ''}</div>`).join('') + '</div>'; return; } }
+    m.innerHTML = `<button class="b" onclick="rid=null;render()">返回</button><h2>${LB(r)}・${esc(r.levelName)}</h2><p>${fd(r.date)}　用時 ${durText(r)}${r.parentId ? '（溫習）' : ''}</p><div class="grid">` + r.items.map(x => `<div class="card"><div class="han mid">${esc(x.c)}</div><div>${esc(x.w)}</div><b class="${x.ok ? 'g' : 'rd'}">${x.ok ? '正確' : '錯誤'}</b>${x.imgId ? `<img data-img="${esc(x.imgId)}" alt="">` : ''}</div>`).join('') + '</div>'; return; } }
   const ids = [...new Set([...Q.levels.map(l => l.id), ...Q.records.map(r => r.levelId)])];
   m.innerHTML = '<h2>學習紀錄</h2>' + (ids.map(id => {
     const rs = Q.records.filter(r => r.levelId === id), nm = lv(id) ? lv(id).name : (rs[0] ? rs[0].levelName : '');
@@ -203,7 +227,7 @@ function vHist(m) {
 }
 /* ---------- settings: backup ---------- */
 function vSet(m) {
-  m.innerHTML = `<h2>設定</h2><div class="card"><h3>學習者：${AV(profile.avatar)} ${esc(profile.name)}</h3><div class="row"><button class="b p" onclick="switchLearner()">切換學習者</button><button class="b" onclick="manageLearners()">管理學習者</button></div></div><div class="card"><h3>匯出備份</h3><p><small>只包括「${esc(profile.name)}」的級別、字、紀錄和手寫圖片。未完成的測驗不包括在內。</small></p><button class="b p" onclick="exp()">匯出</button><div id="emsg" class="row"></div></div>
+  m.innerHTML = `<h2>設定</h2><div class="card"><h3>學習者：${AV(profile.avatar)} ${esc(profile.name)}</h3><div class="row"><button class="b p" onclick="switchLearner()">切換學習者</button><button class="b" onclick="manageLearners()">管理學習者</button></div></div><div class="card"><h3>安裝到主畫面</h3><p><small>iPad／iPhone：在 Safari 按「分享」，再選「加入主畫面」。Android／Chrome：選單 →「安裝應用程式」。安裝後，打開過一次的應用程式可以在沒有網絡時使用，所有資料都儲存在這部裝置上。</small></p></div><div class="card"><h3>匯出備份</h3><p><small>只包括「${esc(profile.name)}」的級別、字、紀錄和手寫圖片。未完成的測驗不包括在內。</small></p><button class="b p" onclick="exp()">匯出</button><div id="emsg" class="row"></div></div>
   <div class="card"><h3>匯入備份</h3><p><small>只會影響「${esc(profile.name)}」的資料。</small></p><div class="row"><label><input type="radio" name="im" value="merge" checked style="width:auto;min-height:0"> 合併（保留現有資料）</label><label><input type="radio" name="im" value="replace" style="width:auto;min-height:0"> 取代全部資料</label></div><input type="file" id="fi" accept=".json,application/json"><div id="imsg"></div></div>`;
   $('#fi').onchange = e => { if (e.target.files[0]) imp(e.target.files[0]); e.target.value = ''; };
 }
@@ -238,10 +262,109 @@ function fatal(title, detail, legacy) {
 function dumpLegacy() {
   try { const raw = localStorage.getItem(CQStorage.LEGACY_KEY); const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([raw], { type: 'application/json' })); a.download = '識字原有資料.json'; document.body.appendChild(a); a.click(); a.remove(); } catch (e) { alert('無法讀取原有資料。'); }
 }
+/* ---------- writing correction: five separate attempts for every wrongly written character ---------- */
+function openCorrection(id) {
+  const c = Q.correction(id); if (!c) return;
+  const i = c.items.findIndex(x => !CQCore.attemptsDone(x));
+  corrId = id; corrIdx = i < 0 ? 0 : i; corrSum = c.state === 'done'; inS = false; res = null; hideErr(); render();
+}
+function vCorrection(m) {
+  const c = Q.correction(corrId); if (!c) { corrId = null; return render(); }
+  if (corrSum || c.state === 'done') {
+    const n = c.items.length;
+    m.innerHTML = `<h2>寫五次練習完成</h2><div class="card"><div class="line"><span>級別</span><b>${esc(c.levelName)}</b></div><div class="line"><span>字數</span><b>${n}</b></div><div class="line"><span>已完成</span><b class="g">${n * 5} / ${n * 5}</b></div></div><div class="card"><div class="han mid">${c.items.map(x => esc(x.c)).join(' ')}</div></div><div class="row"><button class="b p" onclick="leaveCorr()">返回</button></div>`;
+    return;
+  }
+  const it = c.items[corrIdx], last = corrIdx + 1 >= c.items.length;
+  m.innerHTML = `<div class="bar"><span id="cprog"></span><button class="b" onclick="leaveCorr()">離開</button></div><div class="stage"><p><b>呢個字未寫正確，請連續寫五次。</b></p>` +
+    `<div class="big han" style="font-size:min(30vw,20vh,180px)">${esc(it.c)}</div>` +
+    (it.w ? `<div class="han mid">${esc(it.w)}${it.wjp ? ` <small>${esc(it.wjp)}</small>` : ''}</div>` : '') +
+    `<div class="row"><button class="b spk" onclick="sayC('c')" aria-label="單字發音">🔊 單字</button>${it.w ? '<button class="b spk" onclick="sayC(\'w\')" aria-label="詞語發音">🔊 詞語</button>' : ''}</div>` +
+    `<div class="five">${[0, 1, 2, 3, 4].map(k => `<div class="slot"><div class="no">${k + 1}</div><canvas id="cc${k}" width="360" height="360" aria-label="第 ${k + 1} 次"></canvas><button class="b" onclick="clrSlot(${k})">清除</button></div>`).join('')}</div>` +
+    `<div class="row"><button class="b p" id="cnext" onclick="nextChar()">${last ? '完成' : '下一個字'}</button></div></div>`;
+  initSlots(c);
+}
+function sayC(k) { const c = Q.correction(corrId), it = c && c.items[corrIdx]; if (it) speak(k === 'w' ? it.w : it.c); }
+function initSlots(c) {
+  Object.values(cTimers).forEach(clearTimeout); cTimers = {}; cFail.clear(); cs = [];
+  const it = c.items[corrIdx], id = corrId, q = Q, st0 = store;
+  for (let k = 0; k < CQCore.ATTEMPTS; k++) {
+    const el = $('#cc' + k), x = el.getContext('2d'), slot = { cv: el, cx: x, dirty: false, drawing: false };
+    x.lineWidth = 7; x.lineCap = x.lineJoin = 'round'; x.strokeStyle = '#111'; x.fillStyle = '#fff'; x.fillRect(0, 0, 360, 360); cs.push(slot);
+    const pt = e => { const r = el.getBoundingClientRect(); return [(e.clientX - r.left) * 360 / (r.width || 360), (e.clientY - r.top) * 360 / (r.height || 360)]; };
+    el.onpointerdown = e => { e.preventDefault(); el.setPointerCapture(e.pointerId); slot.drawing = true; slot.dirty = true; const [px, py] = pt(e); x.beginPath(); x.moveTo(px, py); x.lineTo(px + .01, py); x.stroke(); x.beginPath(); x.moveTo(px, py); };
+    el.onpointermove = e => { if (!slot.drawing) return; e.preventDefault(); const [px, py] = pt(e); x.lineTo(px, py); x.stroke(); x.beginPath(); x.moveTo(px, py); };
+    el.onpointerup = el.onpointercancel = () => { if (!slot.drawing) return; slot.drawing = false; schedSlot(k); };
+    const saved = it.attempts[k];                                      // restore an already saved attempt (refresh / resume)
+    if (saved) st0.getImage(saved).then(r => {
+      if (!r || q !== Q || corrId !== id || cs[k] !== slot || slot.dirty) return;
+      const img = new Image(); img.onload = () => { if (cs[k] !== slot || slot.dirty) return; x.drawImage(img, 0, 0, 360, 360); slot.dirty = true; }; img.src = r.data;
+    }).catch(() => { });
+  }
+  updateCorrProgress();
+}
+function updateCorrProgress() {
+  const c = Q.correction(corrId); if (!c || corrSum) return; const it = c.items[corrIdx], n = c.items.length;
+  const filled = it.attempts.filter(Boolean).length, total = c.items.reduce((t, x) => t + x.attempts.filter(Boolean).length, 0);
+  const p = $('#cprog'); if (p) p.textContent = `第 ${corrIdx + 1} / ${n} 個字　這個字 ${filled} / 5　總進度 ${total} / ${n * 5}`;
+  const b = $('#cnext'); if (b) b.disabled = !CQCore.attemptsDone(it);
+  cs.forEach((s, k) => s.cv.classList.toggle('ok', !!it.attempts[k]));
+}
+function schedSlot(k) { clearTimeout(cTimers[k]); cTimers[k] = setTimeout(() => { delete cTimers[k]; saveSlot(k); }, 400); }
+async function saveSlot(k) {     // a blank canvas is saved as "no attempt": it can never count as completed
+  const q = Q, id = corrId, ci = corrIdx, slot = cs[k]; if (!slot) return;
+  clearTimeout(cTimers[k]); delete cTimers[k];
+  const r = await q.saveAttempt(id, ci, k, slot.dirty ? slot.cv.toDataURL('image/jpeg', .75) : null);
+  if (q !== Q || id !== corrId || ci !== corrIdx) return;
+  if (!r.ok) { cFail.add(k); showBar(`<b>第 ${k + 1} 次的手寫答案沒有儲存成功。</b>（${esc(reason(r.error))}）筆跡仍然保留在畫面上，請按「重試」。儲存成功之前，不能算完成。`, 'retryCorr'); return; }
+  cFail.delete(k); if (!cFail.size) hideErr(); updateCorrProgress();
+}
+function retryCorr() { [...cFail].forEach(k => saveSlot(k)); }
+function clrSlot(k) {
+  const s = cs[k]; if (!s) return; s.cx.fillStyle = '#fff'; s.cx.fillRect(0, 0, 360, 360); s.dirty = false;   // only this attempt
+  if (Q.correction(corrId).items[corrIdx].attempts[k] || cFail.has(k)) saveSlot(k); else clearTimeout(cTimers[k]);
+}
+async function flushCorr() { await Promise.all(Object.keys(cTimers).map(k => saveSlot(+k))); }
+async function nextChar() {
+  const q = Q, id = corrId; await flushCorr(); if (cFail.size || q !== Q) return;
+  const c = q.correction(id); if (!c || !CQCore.attemptsDone(c.items[corrIdx])) return;
+  if (corrIdx + 1 < c.items.length) { corrIdx++; render(); return; }
+  const r = await q.completeCorrection(id); if (q !== Q) return;
+  if (!r.ok) { showBar(`<b>寫五次練習的完成紀錄沒有儲存成功。</b>（${esc(reason(r.error))}）所有筆跡都已保留，請按「重試」。`, 'nextChar'); return; }
+  hideErr(); corrSum = true; render();
+}
+async function leaveCorr() {
+  if (!(await safeToLeave())) return;
+  corrId = null; corrSum = false; cs = []; hideErr(); render(); toast('進度已保留，可以稍後繼續');
+}
+
+/* ---------- app updates (service worker): applied only when the learner chooses AND nothing is in progress ---------- */
+function updateSafe() {   // no question being answered, no marking, no unsaved or failing save
+  if (Q && (Q.busy || Q.draftError)) return false;
+  if (cFail.size || Object.keys(cTimers).length) return false;
+  if (corrId) return corrSum;
+  if (inS) return !!res;                                  // the result screen is fine: everything is already saved
+  return true;
+}
+function showUpdateBar() {
+  let b = $('#updbar'); if (!b) { b = document.createElement('div'); b.id = 'updbar'; document.body.appendChild(b); }
+  b.innerHTML = '<div><b>有新版本可以使用。</b>更新前會先確定所有筆跡和進度都已儲存。正在作答或評分時請先完成或離開，再更新。</div><div class="row"><button class="b p" onclick="applyUpdate()">立即更新</button><button class="b" onclick="hideUpdate()">稍後</button></div>';
+  b.hidden = false;
+}
+function hideUpdate() { const b = $('#updbar'); if (b) b.hidden = true; }
+async function applyUpdate() {
+  if (!updateSafe()) { toast('請先完成或離開目前這一題，才可以更新'); return; }
+  try { if (Q && Q.cur) await Q.flushDraft(); if (corrId) await flushCorr(); }
+  catch (e) { toast('有筆跡未能儲存，暫時不更新'); return; }
+  if (!updateSafe()) { toast('請先完成或離開目前這一題，才可以更新'); return; }   // the screen may have changed while saving
+  if (!CQPwa.applyUpdate()) hideUpdate();
+}
+
 /* ---------- learners: picking, switching, managing ---------- */
 const ACTIVE_KEY = 'cq-active-profile';   // sessionStorage: survives a page refresh in this tab, forgotten when the tab/app is closed
 function resetLearnerState() {            // nothing of the previous learner may stay in memory or on screen
   tab = 'levels'; lid = null; rid = null; inS = false; res = null; dirty = false; drawing = false; cv = cx = null;
+  corrId = null; corrSum = false; cs = []; Object.values(cTimers).forEach(clearTimeout); cTimers = {}; cFail.clear(); autoKey = null;
   hideErr(); document.querySelectorAll('.modal').forEach(d => d.remove());
   const t = $('#toast'); if (t) t.hidden = true;
   $('#main').innerHTML = '';
@@ -319,12 +442,13 @@ async function boot() {
   catch (e) { return fatal('無法使用儲存空間', '這個瀏覽器目前無法使用儲存空間（IndexedDB），所以不能儲存資料。請不要使用私密瀏覽，或換一個瀏覽器再試。'); }
   try { await CQProfiles.adoptLegacy(mgr, window.localStorage); }
   catch (e) { return fatal('資料轉移未能完成', (e.parts && e.parts.length ? '核對時發現以下部分不相符：' + esc(e.parts.join('、')) + '。' : '') + '原有的資料沒有被刪除，也沒有改動。請按「重試」。如果仍然失敗，請先下載原有資料作備份。', true); }
-  const flushNow = () => { if (Q && Q.cur) Q.flushDraft().catch(() => { }); };
+  const flushNow = () => { if (Q && Q.cur) Q.flushDraft().catch(() => { }); if (Q && corrId) flushCorr().catch(() => { }); };
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushNow(); });
   window.addEventListener('pagehide', flushNow);
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => { });
   if (window.speechSynthesis) speechSynthesis.getVoices();
   let last = null; try { last = sessionStorage.getItem(ACTIVE_KEY); } catch (e) { }
   if (last && await mgr.get(last).then(p => p && !p.archivedAt, () => false)) await selectProfile(last); else render();
+  CQPwa.register({ onUpdate: showUpdateBar });   // after the app is up: offline support must never delay or break the app itself
 }
 window.__cqReady = boot();
