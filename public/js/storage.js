@@ -4,7 +4,7 @@
   const m = factory();
   if (typeof module === 'object' && module.exports) module.exports = m; else root.CQStorage = m;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
-  const DB_NAME = 'cantonese-quiz', DB_VERSION = 1, LEGACY_KEY = 'cantonese-quiz-v1';
+  const DB_NAME = 'cantonese-quiz', DB_VERSION = 2, LEGACY_KEY = 'cantonese-quiz-v1';
 
   class StorageError extends Error {
     constructor(code, message, cause) { super(message); this.name = 'StorageError'; this.code = code; this.cause = cause; }
@@ -29,6 +29,7 @@
           db.createObjectStore('sessions');
           db.createObjectStore('meta');
         }
+        if (old < 2) db.createObjectStore('corrections', { keyPath: 'id' });   // v2: writing-correction activities (data only added, never changed)
       };
       rq.onsuccess = () => { const db = rq.result; db.onversionchange = () => db.close(); resolve(db); };
       rq.onerror = () => reject(wrap(rq.error, 'unavailable'));
@@ -55,8 +56,9 @@
     return {
       db,
       loadAll() {
-        return run(db, ['levels', 'records', 'sessions'], 'readonly', (lv, rc, ss, out) => {
+        return run(db, ['levels', 'records', 'sessions', 'corrections'], 'readonly', (lv, rc, ss, cs, out) => {
           const o = out.v = {};
+          cs.getAll().onsuccess = e => { o.corrections = e.target.result; };
           lv.getAll().onsuccess = e => { o.levels = e.target.result; };
           rc.getAll().onsuccess = e => { o.records = e.target.result; };
           ss.get('current').onsuccess = e => { o.session = e.target.result || null; };
@@ -81,8 +83,16 @@
         });
       },
       /* Finish: write the completed record and remove the unfinished session in ONE transaction. */
-      completeSession(record) {
-        return run(db, ['records', 'sessions'], 'readwrite', (rc, ss) => { rc.put(record); ss.delete('current'); ss.delete('draft'); });
+      /* The optional writing-correction activity is created in the SAME transaction (put-if-absent: its id is derived from the
+         record id, so it can never be created twice). */
+      completeSession(record, correction) {
+        return run(db, ['records', 'sessions', 'corrections'], 'readwrite', (rc, ss, cs) => {
+          rc.put(record); ss.delete('current'); ss.delete('draft'); if (correction) putIfAbsent(cs, correction);
+        });
+      },
+      /* One correction attempt: the updated activity, the new image (or none = attempt cleared) and removal of the replaced image, atomically. */
+      saveCorrection(correction, image, deleteImgId) {
+        return run(db, ['corrections', 'images'], 'readwrite', (cs, im) => { if (image) im.put(image); if (deleteImgId) im.delete(deleteImgId); cs.put(correction); });
       },
       discardSession(sid) {
         return run(db, ['sessions', 'images'], 'readwrite', (ss, im) => {
@@ -107,9 +117,14 @@
       },
       /* Replace every data store in one transaction (explicit "replace all" import). */
       replaceAll({ levels, records, images }) {
-        return run(db, ['levels', 'records', 'images', 'sessions'], 'readwrite', (lv, rc, im, ss) => {
-          lv.clear(); rc.clear(); im.clear(); ss.clear();
-          levels.forEach((x, i) => lv.put({ ...x, ord: i })); records.forEach(x => rc.put(x)); images.forEach(x => im.put(x));
+        return run(db, ['levels', 'records', 'images', 'sessions', 'corrections'], 'readwrite', (lv, rc, im, ss, cs) => {
+          lv.clear(); rc.clear(); ss.clear();
+          levels.forEach((x, i) => lv.put({ ...x, ord: i })); records.forEach(x => rc.put(x));
+          // writing-correction activities are not part of the backup format yet: keep them (and their images) instead of silently losing them
+          cs.getAllKeys().onsuccess = e => {
+            const keep = new Set(e.target.result);
+            im.openCursor().onsuccess = ev => { const c = ev.target.result; if (c) { if (!keep.has(c.value.sid)) c.delete(); c.continue(); } else images.forEach(x => im.put(x)); };
+          };
         });
       },
       /* Merge: updated levels are written whole; new levels are appended after the existing ones;

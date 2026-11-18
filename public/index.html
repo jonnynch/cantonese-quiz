@@ -28,6 +28,10 @@ h2,h3,h4{margin:.2em 0 .4em}small{color:var(--mut);font-weight:400}
 .mid{font-size:64px;line-height:1.1}
 .ans{font-size:72px;min-height:80px;line-height:1.1}
 .spk{font-size:26px;min-width:150px;min-height:72px}
+#main .five{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;width:100%;max-width:980px}
+.slot{display:flex;flex-direction:column;align-items:center;gap:6px;position:relative}
+.slot .no{position:absolute;top:6px;left:8px;font-weight:700;font-size:1.3em;background:var(--jade);color:var(--on);border-radius:50%;width:1.8em;height:1.8em;display:flex;align-items:center;justify-content:center;z-index:1}
+.slot canvas{width:100%;min-width:0;max-width:300px}.slot canvas.ok{border-color:var(--jade)}
 canvas{width:min(92vw,calc(100vh - 360px),640px);min-width:260px;aspect-ratio:1;background:#fff;border:3px solid var(--ink);border-radius:8px;touch-action:none}
 .mk img,.card img{width:100%;max-width:240px;border:1px solid var(--line);background:#fff;border-radius:6px}
 .line{display:flex;justify-content:space-between;width:100%;padding:6px 0;border-top:1px solid var(--line)}
