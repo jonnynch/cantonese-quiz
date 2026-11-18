@@ -16,4 +16,4 @@ Pure HTML/CSS/JS, client-side only. Open `index.html` in a browser (or serve the
 Levels, records, handwriting images and the unfinished session are stored in IndexedDB (`cantonese-quiz`). Data from older versions in `localStorage` is migrated automatically and is only removed after the copy has been verified.
 
 ## Tests
-`npm install && npm test` (Node 20+; uses `node --test`, `fake-indexeddb` and `jsdom`).
+`npm install && npm test` (Node 22.22.2+, 24.15+ or 26+, as required by `jsdom`; uses `node --test`, `fake-indexeddb` and `jsdom`).
