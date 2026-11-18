@@ -227,7 +227,7 @@ function vHist(m) {
 }
 /* ---------- settings: backup ---------- */
 function vSet(m) {
-  m.innerHTML = `<h2>設定</h2><div class="card"><h3>學習者：${AV(profile.avatar)} ${esc(profile.name)}</h3><div class="row"><button class="b p" onclick="switchLearner()">切換學習者</button><button class="b" onclick="manageLearners()">管理學習者</button></div></div><div class="card"><h3>匯出備份</h3><p><small>只包括「${esc(profile.name)}」的級別、字、紀錄和手寫圖片。未完成的測驗不包括在內。</small></p><button class="b p" onclick="exp()">匯出</button><div id="emsg" class="row"></div></div>
+  m.innerHTML = `<h2>設定</h2><div class="card"><h3>學習者：${AV(profile.avatar)} ${esc(profile.name)}</h3><div class="row"><button class="b p" onclick="switchLearner()">切換學習者</button><button class="b" onclick="manageLearners()">管理學習者</button></div></div><div class="card"><h3>安裝到主畫面</h3><p><small>iPad／iPhone：在 Safari 按「分享」，再選「加入主畫面」。Android／Chrome：選單 →「安裝應用程式」。安裝後，打開過一次的應用程式可以在沒有網絡時使用，所有資料都儲存在這部裝置上。</small></p></div><div class="card"><h3>匯出備份</h3><p><small>只包括「${esc(profile.name)}」的級別、字、紀錄和手寫圖片。未完成的測驗不包括在內。</small></p><button class="b p" onclick="exp()">匯出</button><div id="emsg" class="row"></div></div>
   <div class="card"><h3>匯入備份</h3><p><small>只會影響「${esc(profile.name)}」的資料。</small></p><div class="row"><label><input type="radio" name="im" value="merge" checked style="width:auto;min-height:0"> 合併（保留現有資料）</label><label><input type="radio" name="im" value="replace" style="width:auto;min-height:0"> 取代全部資料</label></div><input type="file" id="fi" accept=".json,application/json"><div id="imsg"></div></div>`;
   $('#fi').onchange = e => { if (e.target.files[0]) imp(e.target.files[0]); e.target.value = ''; };
 }
@@ -338,6 +338,28 @@ async function leaveCorr() {
   corrId = null; corrSum = false; cs = []; hideErr(); render(); toast('進度已保留，可以稍後繼續');
 }
 
+/* ---------- app updates (service worker): applied only when the learner chooses AND nothing is in progress ---------- */
+function updateSafe() {   // no question being answered, no marking, no unsaved or failing save
+  if (Q && (Q.busy || Q.draftError)) return false;
+  if (cFail.size || Object.keys(cTimers).length) return false;
+  if (corrId) return corrSum;
+  if (inS) return !!res;                                  // the result screen is fine: everything is already saved
+  return true;
+}
+function showUpdateBar() {
+  let b = $('#updbar'); if (!b) { b = document.createElement('div'); b.id = 'updbar'; document.body.appendChild(b); }
+  b.innerHTML = '<div><b>有新版本可以使用。</b>更新前會先確定所有筆跡和進度都已儲存。正在作答或評分時請先完成或離開，再更新。</div><div class="row"><button class="b p" onclick="applyUpdate()">立即更新</button><button class="b" onclick="hideUpdate()">稍後</button></div>';
+  b.hidden = false;
+}
+function hideUpdate() { const b = $('#updbar'); if (b) b.hidden = true; }
+async function applyUpdate() {
+  if (!updateSafe()) { toast('請先完成或離開目前這一題，才可以更新'); return; }
+  try { if (Q && Q.cur) await Q.flushDraft(); if (corrId) await flushCorr(); }
+  catch (e) { toast('有筆跡未能儲存，暫時不更新'); return; }
+  if (!updateSafe()) { toast('請先完成或離開目前這一題，才可以更新'); return; }   // the screen may have changed while saving
+  if (!CQPwa.applyUpdate()) hideUpdate();
+}
+
 /* ---------- learners: picking, switching, managing ---------- */
 const ACTIVE_KEY = 'cq-active-profile';   // sessionStorage: survives a page refresh in this tab, forgotten when the tab/app is closed
 function resetLearnerState() {            // nothing of the previous learner may stay in memory or on screen
@@ -427,5 +449,6 @@ async function boot() {
   if (window.speechSynthesis) speechSynthesis.getVoices();
   let last = null; try { last = sessionStorage.getItem(ACTIVE_KEY); } catch (e) { }
   if (last && await mgr.get(last).then(p => p && !p.archivedAt, () => false)) await selectProfile(last); else render();
+  CQPwa.register({ onUpdate: showUpdateBar });   // after the app is up: offline support must never delay or break the app itself
 }
 window.__cqReady = boot();

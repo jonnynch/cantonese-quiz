@@ -1,0 +1,6 @@
+# Cloudflare static-assets headers (this file itself is not served).
+# The service worker script must always be revalidated so that updates are noticed.
+/sw.js
+  Cache-Control: no-cache
+/manifest.webmanifest
+  Content-Type: application/manifest+json
