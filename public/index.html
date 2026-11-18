@@ -37,6 +37,15 @@ button.line{border-radius:0;background:transparent;min-height:48px;padding:0 4px
 .modal form{width:min(460px,100%);max-height:100%;overflow:auto}
 label{display:block;margin:8px 0;font-weight:600}
 input{width:100%;min-height:50px;font:inherit;padding:0 12px;border:2px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink)}
+button.who{display:flex;align-items:center;gap:8px;font-weight:700}
+button.who small{font-weight:400;opacity:.75}
+.av1{font-size:1.5em;line-height:1}.av1.big{font-size:2.6em}
+button.pick{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;min-height:180px;cursor:pointer;font:inherit;color:inherit}
+button.pick .av{font-size:4em;line-height:1}button.pick .nm{font-size:1.4em;font-weight:700}
+.prow{display:flex;align-items:center;gap:14px;flex-wrap:wrap}.prow .grow{flex:1;font-size:1.2em}
+.avs{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:10px 0}
+.avs .av{font-size:2.2em;min-height:64px;border:3px solid transparent;border-radius:14px;background:var(--card);cursor:pointer}
+.avs .av.on{border-color:var(--jade)}
 #errbar{position:fixed;left:12px;right:12px;bottom:calc(12px + env(safe-area-inset-bottom,0px));background:var(--card);border:3px solid var(--red);border-radius:14px;padding:12px 16px;z-index:11;box-shadow:0 4px 20px rgba(0,0,0,.35)}
 #errbar[hidden]{display:none}
 ul.warn{margin:4px 0;padding-left:1.4em}
@@ -45,5 +54,6 @@ ul.warn{margin:4px 0;padding-left:1.4em}
 <div id="nav"></div><div id="main"></div>
 <script src="js/storage.js"></script>
 <script src="js/core.js"></script>
+<script src="js/profiles.js"></script>
 <script src="js/app.js"></script>
 </body></html>

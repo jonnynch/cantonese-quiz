@@ -15,5 +15,8 @@ Pure HTML/CSS/JS, client-side only. Open `index.html` in a browser (or serve the
 ## Storage
 Levels, records, handwriting images and the unfinished session are stored in IndexedDB (`cantonese-quiz`). Data from older versions in `localStorage` is migrated automatically and is only removed after the copy has been verified.
 
+## Learner profiles
+Each learner has a separate IndexedDB database (`cantonese-quiz-<profileId>`) holding their levels, characters, records, handwriting images, unfinished session and draft, so data cannot mix between learners. The learner list (id, name, avatar, createdAt, updatedAt, archivedAt) lives in `cantonese-quiz-profiles`. The database that existed before profiles (`cantonese-quiz`) is adopted in place as the default learner `p-legacy`; nothing is copied, rewritten or deleted. The active learner is remembered per browser tab (sessionStorage), so a refresh stays on the same learner while a newly opened app asks who is learning. Backup export/import (Settings) applies to the active learner only.
+
 ## Tests
 `npm install && npm test` (Node 22.22.2+, 24.15+ or 26+, as required by `jsdom`; uses `node --test`, `fake-indexeddb` and `jsdom`).

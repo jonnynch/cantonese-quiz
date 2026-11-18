@@ -180,7 +180,7 @@
       this.levels = []; this.records = []; this.cur = null; this.busy = false; this.retry = null; this.result = null;
       this.draftDelay = o.draftDelay == null ? 400 : o.draftDelay;
       this.onDraftError = null; this.onDraftOk = null; this.draftError = null;
-      this._pend = null; this._timer = null; this._flushing = null; this._flushRunning = false; this._seq = Date.now() * 1000;
+      this._pend = null; this._timer = null; this._flushing = null; this._flushRunning = false; this.closed = false; this._lastAct = Promise.resolve(); this._seq = Date.now() * 1000;
     }
     async init() { this._set(await this.store.loadAll()); }
     _set(d) {
@@ -188,12 +188,26 @@
     }
     level(id) { return this.levels.find(l => l.id === id); }
 
-    async _act(fn) {
-      if (this.busy) return { ok: false, busy: true };
+    _act(fn) {
+      if (this.closed) return Promise.resolve({ ok: false, error: new Error('This learner session is closed') });
+      if (this.busy) return Promise.resolve({ ok: false, busy: true });
       this.busy = true;
-      try { await fn(); this.retry = null; return { ok: true }; }
-      catch (e) { this.retry = fn; return { ok: false, error: e }; }
-      finally { this.busy = false; }
+      const p = (async () => {
+        try { await fn(); this.retry = null; return { ok: true }; }
+        catch (e) { this.retry = fn; return { ok: false, error: e }; }
+        finally { this.busy = false; }
+      })();
+      this._lastAct = p.then(() => { }, () => { });
+      return p;
+    }
+    /* Called when switching learner: save the pending drawing, wait for any save in flight, then refuse all further actions.
+       Returns { ok:false, error } if the pending drawing could not be saved (the caller decides whether to continue). */
+    async close() {
+      let error = null;
+      try { await this.flushDraft(); } catch (e) { error = e; }
+      await this._lastAct;
+      this._dropDraft(); this.closed = true;
+      return error ? { ok: false, error } : { ok: true };
     }
     async retryLast() {
       const f = this.retry; if (!f) return { ok: false };
@@ -205,6 +219,7 @@
        happens, so the latest strokes win. Writes are serialised (never overlapping), coalesced (only the newest pending
        drawing is written) and carry an increasing seq so an old write can never replace a newer one in IndexedDB. */
     scheduleDraft(get, o) {
+      if (this.closed) return;
       const s = this.cur; if (!s || s.kind !== 'write' || s.phase !== 'ask') return;
       this._pend = { sid: s.id, qi: s.i, cid: s.items[s.i].cid, get };
       clearTimeout(this._timer); this._timer = null;
