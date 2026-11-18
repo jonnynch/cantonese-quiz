@@ -9,5 +9,11 @@ Pure HTML/CSS/JS, client-side only. Open `index.html` in a browser (or serve the
 
 ## Known limitations
 - Backup is JSON (handwriting images embedded), not ZIP.
-- No local audio upload yet; data is in localStorage (not IndexedDB).
-- No automated tests or CI yet.
+- No local audio upload yet.
+- Handwriting on the current question is autosaved shortly after each stroke (restored at slightly lower image quality); a stroke made in the last fraction of a second before a crash or reload can still be lost.
+
+## Storage
+Levels, records, handwriting images and the unfinished session are stored in IndexedDB (`cantonese-quiz`). Data from older versions in `localStorage` is migrated automatically and is only removed after the copy has been verified.
+
+## Tests
+`npm install && npm test` (Node 22.22.2+, 24.15+ or 26+, as required by `jsdom`; uses `node --test`, `fake-indexeddb` and `jsdom`).
