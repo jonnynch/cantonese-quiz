@@ -3,7 +3,7 @@ const { S, IMG, newIdb, newStore, memLS, legacyBlob, quota, CH, level } = requir
 
 test('IndexedDB: database is created and basic read/write works', async () => {
   const st = await newStore();
-  assert.deepEqual([...st.db.objectStoreNames].sort(), ['corrections', 'images', 'levels', 'meta', 'records', 'sessions']);
+  assert.deepEqual([...st.db.objectStoreNames].sort(), ['corrections', 'drafts', 'images', 'levels', 'meta', 'records', 'sessions', 'unfinished']);
   await st.saveLevels([level('L1', 'A', [CH('c1', '日')]), level('L2', 'B', [])]);
   await st.saveSession({ id: 's', items: [] }, { id: 'i1', sid: 's', data: IMG });
   const d = await st.loadAll();

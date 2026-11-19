@@ -81,9 +81,10 @@ test('autosave: drafts are not shared between sessions', async () => {
   assert.equal(await q.loadDraft(), null);
   await st.saveDraft({ sid: 'another-session', qi: 0, cid: q.cur.items[0].cid, seq: 1, data: IMG + 'X' });
   assert.equal(await q.loadDraft(), null);
-  q.scheduleDraft(() => IMG + 'B'); await q.flushDraft();                           // starting over an unfinished session also clears it
+  q.scheduleDraft(() => IMG + 'B'); await q.flushDraft();                           // explicitly starting over the same exercise also clears ITS draft
+  const old = q.cur.id; assert.equal((await st.getDraft(old)).data, IMG + 'B');
   await q.startSession({ kind: 'write', levelId: 'L1', mode: 'practice', confirm: () => true });
-  assert.equal(await st.getDraft(), null);
+  assert.equal(await st.getDraft(old), null); assert.equal(await q.loadDraft(), null);
 });
 
 test('autosave: completing a question waits for the pending autosave', async () => {
