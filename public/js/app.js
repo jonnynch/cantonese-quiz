@@ -53,7 +53,7 @@ async function safeToLeave() {
 }
 async function go(t) {
   if (!(await safeToLeave())) return;
-  hideErr(); inS = false; res = null; corrId = null; corrSum = false; tab = t; lid = null; rid = null; dirty = false; render();
+  silence(); hideErr(); inS = false; res = null; corrId = null; corrSum = false; tab = t; lid = null; rid = null; dirty = false; render();
 }
 /* ---------- forms ---------- */
 function form(title, fields, vals, cb) {
@@ -137,35 +137,54 @@ function sess(m) {
   if (s.kind === 'read') {
     m.innerHTML = head + `<div class="stage"><div class="big han">${esc(it.c)}</div><div class="row"><button class="b r" style="min-width:150px;min-height:72px" onclick="mark(false)">錯誤</button><button class="b p" style="min-width:150px;min-height:72px" onclick="mark(true)">正確</button></div></div>`; return;
   }
-  m.innerHTML = head + `<div class="stage"><div class="row"><button class="b spk" onclick="say('w')" ${it.w ? '' : 'disabled'} aria-label="詞語發音">🔊 詞語</button><button class="b spk" onclick="say('c')" aria-label="單字發音">🔊 單字</button></div>` +
+  m.innerHTML = head + `<div class="stage"><div class="row"><button class="b spk" onclick="say('c')" aria-label="單字發音">🔊 單字</button><button class="b spk" onclick="say('w')" ${it.w ? '' : 'disabled'} aria-label="詞語發音">🔊 詞語</button></div>` +
     (s.mode === 'exam' ? '' : `<div class="row"><button class="b" id="rv" onclick="rev()">顯示答案</button><span id="ans" class="han ans"></span></div>`) +
     `<canvas id="cv" width="640" height="640"></canvas><div class="row"><button class="b" id="clrbtn" onclick="clr()">清除</button><button class="b p" onclick="done()">${s.i + 1 < n ? '下一題' : '完成'}</button></div></div>`;
   initCv();
 }
 async function leave() {
   if (!(await safeToLeave())) return;
-  hideErr(); inS = false; dirty = false; render(); toast('進度和筆跡已保留，可以稍後繼續');
+  silence(); hideErr(); inS = false; dirty = false; render(); toast('進度和筆跡已保留，可以稍後繼續');
 }
 async function mark(ok) { const q = Q; after(await q.answerRead(ok), '這一題的答案', q); }
 function say(k) { const it = Q.cur.items[Q.cur.i]; speak(k === 'w' ? it.w : it.c); }
-function speak(t, quiet) {   // quiet = automatic speech: never show messages, never throw
-  if (!t) return; const ss = window.speechSynthesis; if (!ss || !window.SpeechSynthesisUtterance) { if (!quiet) toast('這部裝置不支援語音'); return; }
+/* Speak one or more phrases strictly one after another (a short pause between them). Starting any new speech, or silence(), invalidates a
+   sequence that is still waiting, so two voices never overlap and a stale second phrase is never spoken.
+   quiet = automatic speech: never show messages, never throw. */
+let speechSeq = 0, gapTimer = null, speechGap = 400;
+function silence() { speechSeq++; clearTimeout(gapTimer); try { const ss = window.speechSynthesis; if (ss) ss.cancel(); } catch (e) { } }
+function speakSeq(parts, quiet) {
+  parts = parts.filter(Boolean); if (!parts.length) return;
+  const ss = window.speechSynthesis; if (!ss || !window.SpeechSynthesisUtterance) { if (!quiet) toast('這部裝置不支援語音'); return; }
+  const my = ++speechSeq; clearTimeout(gapTimer);
   try {
     const v = ss.getVoices().find(x => /zh[-_]HK|yue/i.test(x.lang));
     if (!v && !quiet) toast('找不到廣東話語音，發音可能不準確');
-    ss.cancel(); const u = new SpeechSynthesisUtterance(t); u.lang = 'zh-HK'; if (v) u.voice = v; u.rate = .8; ss.speak(u);   // cancel() first: never two voices at once
+    ss.cancel();                                                       // cancel() first: never two voices at once
+    const next = k => {
+      if (my !== speechSeq || k >= parts.length) return;
+      const u = new SpeechSynthesisUtterance(parts[k]); u.lang = 'zh-HK'; if (v) u.voice = v; u.rate = .8;
+      let moved = false, fb = null;
+      const go = () => { if (moved) return; moved = true; clearTimeout(fb); if (k + 1 < parts.length && my === speechSeq) gapTimer = setTimeout(() => next(k + 1), speechGap); };
+      fb = setTimeout(go, 4000); u.onend = u.onerror = go;             // some engines never report the end: do not get stuck
+      try { ss.speak(u); } catch (e) { clearTimeout(fb); moved = true; if (!quiet) toast('無法播放語音'); }
+    };
+    next(0);
   } catch (e) { if (!quiet) toast('無法播放語音'); }
 }
+const speak = (t, quiet) => speakSeq([t], quiet);
 /* iOS only allows speech that was started from a tap: prime it synchronously inside the tap handler, before any await. */
 function unlockSpeech() {
   try { const ss = window.speechSynthesis; if (!speechUnlocked && ss && window.SpeechSynthesisUtterance) { const u = new SpeechSynthesisUtterance(''); u.volume = 0; ss.speak(u); speechUnlocked = true; } } catch (e) { }
 }
-/* Pronounce the isolated target character once per question (never the compound word). Called only when a question is newly entered
-   (session start / after an answer advanced), never from render or resume, and remembered per session+question. */
+/* Pronounce the target character, then (after a short pause) its compound word with the character identified in context, e.g. 左 ... 左右嘅左.
+   Nothing is shown on screen. Called only when a question is newly entered (session start / after an answer advanced), never from render
+   or resume, and remembered per session+question. The compound word is the existing data (none, or the character itself: character only). */
 function autoSpeak() {
   const s = Q && Q.cur; if (!s || s.kind !== 'write' || s.phase !== 'ask' || corrId) return;
   const key = s.id + ':' + s.i; if (autoKey === key) return; autoKey = key;
-  speak(s.items[s.i].c, true);
+  const it = s.items[s.i];
+  speakSeq([it.c, it.w && it.w !== it.c ? it.w + '嘅' + it.c : ''], true);
 }
 function rev() { const a = $('#ans'), b = $('#rv'); if (a.textContent) { a.textContent = ''; b.textContent = '顯示答案'; } else { a.textContent = Q.cur.items[Q.cur.i].c; b.textContent = '隱藏答案'; } }
 function initCv() {
@@ -348,7 +367,7 @@ async function nextChar() {
 }
 async function leaveCorr() {
   if (!(await safeToLeave())) return;
-  corrId = null; corrSum = false; cs = []; hideErr(); render(); toast('進度已保留，可以稍後繼續');
+  silence(); corrId = null; corrSum = false; cs = []; hideErr(); render(); toast('進度已保留，可以稍後繼續');
 }
 
 /* ---------- app updates (service worker): applied only when the learner chooses AND nothing is in progress ---------- */
@@ -378,7 +397,7 @@ const ACTIVE_KEY = 'cq-active-profile';   // sessionStorage: survives a page ref
 function resetLearnerState() {            // nothing of the previous learner may stay in memory or on screen
   tab = 'levels'; lid = null; rid = null; inS = false; res = null; dirty = false; drawing = false; cv = cx = null;
   corrId = null; corrSum = false; cs = []; Object.values(cTimers).forEach(clearTimeout); cTimers = {}; cFail.clear(); autoKey = null;
-  hideErr(); document.querySelectorAll('.modal').forEach(d => d.remove());
+  silence(); hideErr(); document.querySelectorAll('.modal').forEach(d => d.remove());
   const t = $('#toast'); if (t) t.hidden = true;
   $('#main').innerHTML = '';
 }

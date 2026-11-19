@@ -17,7 +17,7 @@ function install(e) {
     P.getContext = () => ctx; P.setPointerCapture = () => { }; let n = 0; P.toDataURL = () => 'data:image/jpeg;base64,INK' + (++n);
     w.Image = class { set src(v) { this._s = v; setTimeout(() => this.onload && this.onload(), 0); } get src() { return this._s; } };
     w.SpeechSynthesisUtterance = class { constructor(t) { this.text = t; } };
-    w.speechSynthesis = { getVoices: () => [], cancel() { e.spoken.push('<cancel>'); }, speak(u) { if (e.speechFails) throw new Error('blocked'); e.spoken.push(u.text); } };
+    w.speechSynthesis = { getVoices: () => [], cancel() { e.spoken.push('<cancel>'); }, speak(u) { if (e.speechFails) throw new Error('blocked'); e.spoken.push(u.text); e.log && e.log.push('start:' + u.text + ':' + u.lang); setTimeout(() => { e.log && e.log.push('end:' + u.text); u.onend && u.onend(); }, 5); } };
   };
 }
 async function openPage(idb, e, { legacy, active } = {}) {
@@ -59,29 +59,28 @@ test('writing practice and writing exam each show exactly one clear button, whic
 });
 
 /* ---------------- 2. automatic pronunciation ---------------- */
-test('automatic speech: the target character once per question, never the compound word, no duplicates on rerender or resume', async () => {
-  const idb = newIdb(), e = env(), id = await seed(idb); let dom = await openPage(idb, e, { active: id });
+test('automatic speech: the character, then its compound word, once per question, no duplicates on rerender or resume', async () => {
+  const idb = newIdb(), e = env(), id = await seed(idb); let dom = await openPage(idb, e, { active: id }); ev(dom, 'speechGap = 20');
   ev(dom, "start('write','L1','practice')"); await tick();
-  const first = ev(dom, 'Q.cur.items[0].c'), second = ev(dom, 'Q.cur.items[1].c');
-  assert.deepEqual(texts(e), [first]);                                                                         // one pronunciation of the isolated character
+  const first = ev(dom, 'Q.cur.items[0].c'), second = ev(dom, 'Q.cur.items[1].c'), ph = i => ev(dom, `Q.cur.items[${i}].w + '嘅' + Q.cur.items[${i}].c`);
+  await wait(80); assert.deepEqual(texts(e), [first, ph(0)]);                                                  // character, then the compound word in context
   assert.equal(e.spoken[e.spoken.indexOf(first) - 1], '<cancel>');                                             // cancels earlier speech first: no overlap
   for (let i = 0; i < 3; i++) { ev(dom, 'render()'); ev(dom, "autoSpeak()"); }
   ev(dom, "go('levels')"); await tick(); ev(dom, "go('practice')"); await tick(); ev(dom, 'resume()'); await tick(); ev(dom, 'toast("x")');
-  assert.deepEqual(texts(e), [first], 'rerenders, tab changes and state updates must not repeat it');
+  await wait(80); assert.deepEqual(texts(e), [first, ph(0)], 'rerenders, tab changes and state updates must not repeat it');
   assert.equal(dom.window.document.querySelector('#ans').textContent, ''); assert.ok([...dom.window.document.querySelectorAll('.han')].every(x => x.textContent === ''));   // speech never reveals the target
   stroke(dom.window.document.querySelector('#cv')); ev(dom, 'done()'); await tick(); await tick();
-  assert.deepEqual(texts(e), [first, second]);                                                                 // next question: next character, once
-  ev(dom, 'render()'); ev(dom, 'render()'); assert.equal(texts(e).length, 2);
-  assert.ok(!texts(e).some(t => t.startsWith('w')), 'the compound word is never spoken automatically');
-  ev(dom, "say('w')"); assert.equal(texts(e).at(-1), ev(dom, 'Q.cur.items[1].w'));                             // manual buttons still work
+  await wait(80); assert.deepEqual(texts(e), [first, ph(0), second, ph(1)]);                                   // next question: its character then word, once
+  ev(dom, 'render()'); ev(dom, 'render()'); await wait(60); assert.equal(texts(e).length, 4);
+  ev(dom, "say('w')"); assert.equal(texts(e).at(-1), ev(dom, 'Q.cur.items[1].w'));                             // manual buttons still read only the word / only the character
   ev(dom, "say('c')"); assert.equal(texts(e).at(-1), second);
   dom.window.close();
   // browser reload while resuming the unfinished session: nothing is spoken again
-  const e2 = env(); dom = await openPage(idb, e2, { active: id });
+  const e2 = env(); dom = await openPage(idb, e2, { active: id }); ev(dom, 'speechGap = 20');
   assert.equal(ev(dom, 'Q.cur.i'), 1); ev(dom, 'resume()'); await tick(); ev(dom, 'render()'); await tick();
   assert.deepEqual(texts(e2), [], 'resuming must not replay the current character');
   stroke(dom.window.document.querySelector('#cv')); ev(dom, 'done()'); await tick(); await tick();
-  assert.deepEqual(texts(e2), [ev(dom, 'Q.cur.items[2].c')]);                                                  // but advancing speaks the next one
+  await wait(80); assert.deepEqual(texts(e2), [ev(dom, 'Q.cur.items[2].c'), ev(dom, "Q.cur.items[2].w + '嘅' + Q.cur.items[2].c")]);   // but advancing speaks the next one
   dom.window.close();
 });
 
@@ -89,7 +88,7 @@ test('automatic speech also applies to writing exams and revisions, but not to r
   const idb = newIdb(), e = env(), id = await seed(idb); const dom = await openPage(idb, e, { active: id });
   ev(dom, "start('read','L1','practice')"); await tick(); ev(dom, 'mark(true)'); await tick(); assert.deepEqual(texts(e), []);
   ev(dom, 'leave()'); await tick(); ev(dom, "go('exam')"); await tick();
-  ev(dom, "start('write','L1','exam')"); await tick(); assert.deepEqual(texts(e), [ev(dom, 'Q.cur.items[0].c')]);
+  ev(dom, 'speechGap = 20'); ev(dom, "start('write','L1','exam')"); await wait(100); assert.deepEqual(texts(e), [ev(dom, 'Q.cur.items[0].c'), ev(dom, "Q.cur.items[0].w + '嘅' + Q.cur.items[0].c")]);
   dom.window.close();
 });
 
