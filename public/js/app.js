@@ -148,43 +148,29 @@ async function leave() {
 }
 async function mark(ok) { const q = Q; after(await q.answerRead(ok), '這一題的答案', q); }
 function say(k) { const it = Q.cur.items[Q.cur.i]; speak(k === 'w' ? it.w : it.c); }
-/* Speak one or more phrases strictly one after another (a short pause between them). Starting any new speech, or silence(), invalidates a
-   sequence that is still waiting, so two voices never overlap and a stale second phrase is never spoken.
+/* Speak ONE utterance (zh-HK voice when available). cancel() first: never two voices at once. silence() stops speech when leaving a question.
    quiet = automatic speech: never show messages, never throw. */
-let speechSeq = 0, gapTimer = null, speechGap = 400;
-function silence() { speechSeq++; clearTimeout(gapTimer); try { const ss = window.speechSynthesis; if (ss) ss.cancel(); } catch (e) { } }
-function speakSeq(parts, quiet) {
-  parts = parts.filter(Boolean); if (!parts.length) return;
-  const ss = window.speechSynthesis; if (!ss || !window.SpeechSynthesisUtterance) { if (!quiet) toast('這部裝置不支援語音'); return; }
-  const my = ++speechSeq; clearTimeout(gapTimer);
+function silence() { try { const ss = window.speechSynthesis; if (ss) ss.cancel(); } catch (e) { } }
+function speak(t, quiet) {
+  if (!t) return; const ss = window.speechSynthesis; if (!ss || !window.SpeechSynthesisUtterance) { if (!quiet) toast('這部裝置不支援語音'); return; }
   try {
     const v = ss.getVoices().find(x => /zh[-_]HK|yue/i.test(x.lang));
     if (!v && !quiet) toast('找不到廣東話語音，發音可能不準確');
-    ss.cancel();                                                       // cancel() first: never two voices at once
-    const next = k => {
-      if (my !== speechSeq || k >= parts.length) return;
-      const u = new SpeechSynthesisUtterance(parts[k]); u.lang = 'zh-HK'; if (v) u.voice = v; u.rate = .8;
-      let moved = false, fb = null;
-      const go = () => { if (moved) return; moved = true; clearTimeout(fb); if (k + 1 < parts.length && my === speechSeq) gapTimer = setTimeout(() => next(k + 1), speechGap); };
-      fb = setTimeout(go, 4000); u.onend = u.onerror = go;             // some engines never report the end: do not get stuck
-      try { ss.speak(u); } catch (e) { clearTimeout(fb); moved = true; if (!quiet) toast('無法播放語音'); }
-    };
-    next(0);
+    ss.cancel(); const u = new SpeechSynthesisUtterance(t); u.lang = 'zh-HK'; if (v) u.voice = v; u.rate = .8; ss.speak(u);
   } catch (e) { if (!quiet) toast('無法播放語音'); }
 }
-const speak = (t, quiet) => speakSeq([t], quiet);
 /* iOS only allows speech that was started from a tap: prime it synchronously inside the tap handler, before any await. */
 function unlockSpeech() {
   try { const ss = window.speechSynthesis; if (!speechUnlocked && ss && window.SpeechSynthesisUtterance) { const u = new SpeechSynthesisUtterance(''); u.volume = 0; ss.speak(u); speechUnlocked = true; } } catch (e) { }
 }
-/* Pronounce the target character, then (after a short pause) its compound word with the character identified in context, e.g. 左 ... 左右嘅左.
-   Nothing is shown on screen. Called only when a question is newly entered (session start / after an answer advanced), never from render
-   or resume, and remembered per session+question. The compound word is the existing data (none, or the character itself: character only). */
+/* Automatic pronunciation: ONE utterance, "character。word嘅character" (e.g. 左。左右嘅左); the full stop gives the natural pause, so no second
+   utterance and no timers are needed. Only the character if the existing data has no valid compound word. Nothing is shown on screen.
+   Called only when a question is newly entered (session start / after an answer advanced), never from render or resume, and remembered per session+question. */
+const autoText = it => it.c + (it.w && it.w !== it.c ? '。' + it.w + '嘅' + it.c : '');
 function autoSpeak() {
   const s = Q && Q.cur; if (!s || s.kind !== 'write' || s.phase !== 'ask' || corrId) return;
   const key = s.id + ':' + s.i; if (autoKey === key) return; autoKey = key;
-  const it = s.items[s.i];
-  speakSeq([it.c, it.w && it.w !== it.c ? it.w + '嘅' + it.c : ''], true);
+  speak(autoText(s.items[s.i]), true);
 }
 function rev() { const a = $('#ans'), b = $('#rv'); if (a.textContent) { a.textContent = ''; b.textContent = '顯示答案'; } else { a.textContent = Q.cur.items[Q.cur.i].c; b.textContent = '隱藏答案'; } }
 function initCv() {
