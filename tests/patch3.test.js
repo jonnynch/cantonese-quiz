@@ -231,7 +231,7 @@ test('database upgrade: an existing version-1 database gets the corrections stor
       tx.objectStore('images').put({ id: 'i1', sid: 'r1', data: IMG }); tx.objectStore('sessions').put({ id: 's' }, 'current'); tx.oncomplete = () => { db.close(); res(); }; tx.onerror = () => rej(tx.error); };
   });
   const st = S.createStore(await S.openDb(idb, S.DB_NAME));
-  assert.ok([...st.db.objectStoreNames].includes('corrections')); assert.equal(st.db.version, 3);
+  assert.ok([...st.db.objectStoreNames].includes('corrections')); assert.equal(st.db.version, 4);
   const d = await st.loadAll(); assert.equal(d.levels.length, 1); assert.equal(d.records.length, 1); assert.equal(d.session.id, 's'); assert.deepEqual(d.sessions.map(x => x.id), ['s']); assert.deepEqual(d.corrections, []);   // the v1 session row was moved into the v3 'unfinished' store
   assert.equal((await st.getImage('i1')).data, IMG);
   const q = new C.Quiz(st); await q.init(); assert.equal(q.records[0].started, undefined); assert.equal(C.durationOf(q.records[0]), null);   // legacy record: duration unavailable

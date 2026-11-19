@@ -4,7 +4,7 @@
   const m = factory();
   if (typeof module === 'object' && module.exports) module.exports = m; else root.CQStorage = m;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
-  const DB_NAME = 'cantonese-quiz', DB_VERSION = 3, LEGACY_KEY = 'cantonese-quiz-v1';
+  const DB_NAME = 'cantonese-quiz', DB_VERSION = 4, LEGACY_KEY = 'cantonese-quiz-v1';
 
   class StorageError extends Error {
     constructor(code, message, cause) { super(message); this.name = 'StorageError'; this.code = code; this.cause = cause; }
@@ -30,6 +30,7 @@
           db.createObjectStore('meta');
         }
         if (old < 2) db.createObjectStore('corrections', { keyPath: 'id' });   // v2: writing-correction activities (data only added, never changed)
+        if (old < 4) db.createObjectStore('stats', { keyPath: 'cid' });         // v4: per-character adaptive learning statistics (data only added)
         if (old < 3) {
           // v3: several unfinished sessions (one row per session id) and one handwriting draft per session (keyed by session id).
           // The single v2 session/draft rows are MOVED in this same versionchange transaction: if anything fails the whole upgrade
@@ -62,15 +63,16 @@
     });
   }
   const sortSessions = a => a.slice().sort((x, y) => ((y.updatedAt || y.started || 0) - (x.updatedAt || x.started || 0)) || (x.id < y.id ? -1 : 1));   // newest first
-  const putIfAbsent = (st, obj) => { const r = st.getKey(obj.id); r.onsuccess = () => { if (r.result === undefined) st.put(obj); }; };
+  const putIfAbsent = (st, obj, key) => { const r = st.getKey(key === undefined ? obj.id : key); r.onsuccess = () => { if (r.result === undefined) st.put(obj); }; };
 
   function createStore(db) {
     return {
       db,
       /* `sessions` = every unfinished session. `session` = the most recently updated one (or null), kept for older callers. */
       loadAll() {
-        return run(db, ['levels', 'records', 'unfinished', 'corrections'], 'readonly', (lv, rc, un, cs, out) => {
+        return run(db, ['levels', 'records', 'unfinished', 'corrections', 'stats'], 'readonly', (lv, rc, un, cs, sx, out) => {
           const o = out.v = {};
+          sx.getAll().onsuccess = e => { o.stats = e.target.result; };
           cs.getAll().onsuccess = e => { o.corrections = e.target.result; };
           lv.getAll().onsuccess = e => { o.levels = e.target.result; };
           rc.getAll().onsuccess = e => { o.records = e.target.result; };
@@ -101,11 +103,15 @@
          it is added only if absent (its id is the session id), so a repeated completion can never create or change a record. */
       /* The optional writing-correction activity is created in the SAME transaction (put-if-absent: its id is derived from the
          record id, so it can never be created twice). */
-      completeSession(record, correction) {
-        return run(db, ['records', 'unfinished', 'drafts', 'corrections'], 'readwrite', (rc, un, dr, cs) => {
+      /* The learning statistics rows (already computed from this session's answers) are written in the SAME transaction, so an answer is
+         counted exactly once: together with the completed record, or not at all. */
+      completeSession(record, correction, stats) {
+        return run(db, ['records', 'unfinished', 'drafts', 'corrections', 'stats'], 'readwrite', (rc, un, dr, cs, sx) => {
           putIfAbsent(rc, record); un.delete(record.id); dr.delete(record.id); if (correction) putIfAbsent(cs, correction);
+          (stats || []).forEach(x => sx.put(x));
         });
       },
+      putStats(rows) { return run(db, ['stats'], 'readwrite', (sx) => { rows.forEach(x => sx.put(x)); }); },
       /* One correction attempt: the updated activity, the new image (or none = attempt cleared) and removal of the replaced image, atomically. */
       saveCorrection(correction, image, deleteImgId) {
         return run(db, ['corrections', 'images'], 'readwrite', (cs, im) => { if (image) im.put(image); if (deleteImgId) im.delete(deleteImgId); cs.put(correction); });
@@ -140,9 +146,9 @@
       /* Replace every data store in one transaction (explicit "replace all" import).
          sessions/drafts always come from the backup (an older backup has none: unfinished sessions are then cleared, as the
          confirmation says). corrections: replaced when the backup has them, otherwise the existing ones (and their images) are kept. */
-      replaceAll({ levels, records, images, sessions, drafts, corrections }) {
-        return run(db, ['levels', 'records', 'images', 'sessions', 'unfinished', 'drafts', 'corrections'], 'readwrite', (lv, rc, im, ss, un, dr, cs) => {
-          lv.clear(); rc.clear(); ss.clear(); un.clear(); dr.clear();
+      replaceAll({ levels, records, images, sessions, drafts, corrections, stats }) {
+        return run(db, ['levels', 'records', 'images', 'sessions', 'unfinished', 'drafts', 'corrections', 'stats'], 'readwrite', (lv, rc, im, ss, un, dr, cs, sx) => {
+          lv.clear(); rc.clear(); ss.clear(); un.clear(); dr.clear(); sx.clear(); (stats || []).forEach(x => sx.put(x));
           levels.forEach((x, i) => lv.put({ ...x, ord: i })); records.forEach(x => rc.put(x));
           (sessions || []).forEach(x => un.put(x)); (drafts || []).forEach(x => dr.put(x));
           const keepCorr = corrections === undefined;
@@ -153,8 +159,9 @@
       },
       /* Merge: updated levels are written whole; new levels are appended after the existing ones;
          records/sessions/drafts/corrections/images are only added if absent. */
-      applyMerge({ newLevels, updatedLevels, records, images, sessions, drafts, corrections }) {
-        return run(db, ['levels', 'records', 'images', 'unfinished', 'drafts', 'corrections'], 'readwrite', (lv, rc, im, un, dr, cs) => {
+      applyMerge({ newLevels, updatedLevels, records, images, sessions, drafts, corrections, stats }) {
+        return run(db, ['levels', 'records', 'images', 'unfinished', 'drafts', 'corrections', 'stats'], 'readwrite', (lv, rc, im, un, dr, cs, sx) => {
+          (stats || []).forEach(x => putIfAbsent(sx, x, x.cid));
           updatedLevels.forEach(x => lv.put(x));
           lv.count().onsuccess = e => { newLevels.forEach((x, i) => lv.put({ ...x, ord: e.target.result + i })); };
           records.forEach(x => putIfAbsent(rc, x)); images.forEach(x => putIfAbsent(im, x));
@@ -163,8 +170,9 @@
         });
       },
       exportAll() {
-        return run(db, ['levels', 'records', 'images', 'unfinished', 'drafts', 'corrections'], 'readonly', (lv, rc, im, un, dr, cs, out) => {
+        return run(db, ['levels', 'records', 'images', 'unfinished', 'drafts', 'corrections', 'stats'], 'readonly', (lv, rc, im, un, dr, cs, sx, out) => {
           const o = out.v = {};
+          sx.getAll().onsuccess = e => { o.stats = e.target.result; };
           lv.getAll().onsuccess = e => { o.levels = e.target.result; };
           rc.getAll().onsuccess = e => { o.records = e.target.result; };
           im.getAll().onsuccess = e => { o.images = e.target.result; };
