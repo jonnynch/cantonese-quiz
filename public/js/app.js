@@ -133,6 +133,7 @@ function sess(m) {
   const s = Q.cur; if (!s) { inS = false; return render(); }
   if (s.phase === 'mark') return marking(m, s);
   const it = s.items[s.i], n = s.items.length;
+  Q.qStart(s.id + ':' + s.i);                                  // response time of this question (idempotent on rerender; paused when leaving/hidden)
   const head = `<div class="bar"><span>${s.i + 1} / ${n}</span><button class="b" onclick="leave()" aria-label="暫停並離開，進度會保留">⏸ 暫停（保留進度）</button></div>`;
   if (s.kind === 'read') {
     m.innerHTML = head + `<div class="stage"><div class="big han">${esc(it.c)}</div><div class="row"><button class="b r" style="min-width:150px;min-height:72px" onclick="mark(false)">錯誤</button><button class="b p" style="min-width:150px;min-height:72px" onclick="mark(true)">正確</button></div></div>`; return;
@@ -144,7 +145,7 @@ function sess(m) {
 }
 async function leave() {
   if (!(await safeToLeave())) return;
-  silence(); hideErr(); inS = false; dirty = false; render(); toast('進度和筆跡已保留，可以稍後繼續');
+  silence(); Q.qPause(); hideErr(); inS = false; dirty = false; render(); toast('進度和筆跡已保留，可以稍後繼續');
 }
 async function mark(ok) { const q = Q; after(await q.answerRead(ok), '這一題的答案', q); }
 function say(k) { const it = Q.cur.items[Q.cur.i]; speak(k === 'w' ? it.w : it.c); }
@@ -219,7 +220,17 @@ function result(m) {
   const r = res, a = agg([r]), bad = r.items.filter(x => !x.ok);
   m.innerHTML = `<h2>${LB(r)}結果</h2><div class="card"><div class="line"><span>級別</span><b>${esc(r.levelName)}</b></div><div class="line"><span>類型</span><b>${LB(r)}</b></div><div class="line"><span>用時</span><b>${durText(r)}</b></div><div class="line"><span>題數</span><b>${a.t}</b></div><div class="line"><span>正確</span><b class="g">${a.o}</b></div><div class="line"><span>錯誤</span><b class="rd">${a.t - a.o}</b></div><div class="line"><span>準確率</span><b>${a.p}%</b></div></div>` +
     (bad.length ? `<div class="card"><h3>錯誤的字</h3><div class="han mid">${bad.map(x => esc(x.c)).join(' ')}</div></div>` : '<p class="g"><b>全部正確！</b></p>') +
+    examSummary(r) +
     `<div class="row">${corrButton(r)}${bad.length ? `<button class="b p" onclick="revise()">重新溫習</button>` : ''}<button class="b" onclick="go('${r.mode === 'exam' ? 'exam' : 'practice'}')">返回</button></div>`;
+}
+/* Exam only: where this exam's characters stand now (after the statistics were updated): needs more practice / improving / mastered. */
+function examSummary(r) {
+  if (r.mode !== 'exam') return '';
+  const g = { needs: [], improving: [], mastered: [] };
+  r.items.forEach(x => { const st = Q.statusOf(r.kind, x.cid); if (g[st]) g[st].push(x.c); });
+  const row = (t, a) => a.length ? `<div class="line"><span>${t}</span><span class="han">${a.map(esc).join(' ')}</span></div>` : '';
+  const h = row('需要多練習', g.needs) + row('進步中', g.improving) + row('已掌握', g.mastered);
+  return h ? `<div class="card"><h3>學習進度</h3>${h}</div>` : '';
 }
 async function revise() {
   unlockSpeech();
@@ -245,7 +256,7 @@ function vHist(m) {
 }
 /* ---------- settings: backup ---------- */
 function vSet(m) {
-  m.innerHTML = `<h2>設定</h2><div class="card"><h3>學習者：${AV(profile.avatar)} ${esc(profile.name)}</h3><div class="row"><button class="b p" onclick="switchLearner()">切換學習者</button><button class="b" onclick="manageLearners()">管理學習者</button></div></div><div class="card"><h3>安裝到主畫面</h3><p><small>iPad／iPhone：在 Safari 按「分享」，再選「加入主畫面」。Android／Chrome：選單 →「安裝應用程式」。安裝後，打開過一次的應用程式可以在沒有網絡時使用，所有資料都儲存在這部裝置上。</small></p></div><div class="card"><h3>匯出備份</h3><p><small>包括「${esc(profile.name)}」的級別、字、紀錄、手寫圖片，以及未完成的測驗、未交的手寫草稿和寫五次練習。</small></p><button class="b p" onclick="exp()">匯出</button><div id="emsg" class="row"></div></div>
+  m.innerHTML = `<h2>設定</h2><div class="card"><h3>學習者：${AV(profile.avatar)} ${esc(profile.name)}</h3><div class="row"><button class="b p" onclick="switchLearner()">切換學習者</button><button class="b" onclick="manageLearners()">管理學習者</button></div></div><div class="card"><h3>安裝到主畫面</h3><p><small>iPad／iPhone：在 Safari 按「分享」，再選「加入主畫面」。Android／Chrome：選單 →「安裝應用程式」。安裝後，打開過一次的應用程式可以在沒有網絡時使用，所有資料都儲存在這部裝置上。</small></p></div><div class="card"><h3>匯出備份</h3><p><small>包括「${esc(profile.name)}」的級別、字、紀錄、手寫圖片、未完成的測驗、未交的手寫草稿、寫五次練習和每個字的學習統計。</small></p><button class="b p" onclick="exp()">匯出</button><div id="emsg" class="row"></div></div>
   <div class="card"><h3>匯入備份</h3><p><small>只會影響「${esc(profile.name)}」的資料。</small></p><div class="row"><label><input type="radio" name="im" value="merge" checked style="width:auto;min-height:0"> 合併（保留現有資料）</label><label><input type="radio" name="im" value="replace" style="width:auto;min-height:0"> 取代全部資料</label></div><input type="file" id="fi" accept=".json,application/json"><div id="imsg"></div></div>`;
   $('#fi').onchange = e => { if (e.target.files[0]) imp(e.target.files[0]); e.target.value = ''; };
 }
@@ -383,7 +394,7 @@ const ACTIVE_KEY = 'cq-active-profile';   // sessionStorage: survives a page ref
 function resetLearnerState() {            // nothing of the previous learner may stay in memory or on screen
   tab = 'levels'; lid = null; rid = null; inS = false; res = null; dirty = false; drawing = false; cv = cx = null;
   corrId = null; corrSum = false; cs = []; Object.values(cTimers).forEach(clearTimeout); cTimers = {}; cFail.clear(); autoKey = null;
-  silence(); hideErr(); document.querySelectorAll('.modal').forEach(d => d.remove());
+  silence(); if (Q) Q.qPause(); hideErr(); document.querySelectorAll('.modal').forEach(d => d.remove());
   const t = $('#toast'); if (t) t.hidden = true;
   $('#main').innerHTML = '';
 }
@@ -461,7 +472,10 @@ async function boot() {
   try { await CQProfiles.adoptLegacy(mgr, window.localStorage); }
   catch (e) { return fatal('資料轉移未能完成', (e.parts && e.parts.length ? '核對時發現以下部分不相符：' + esc(e.parts.join('、')) + '。' : '') + '原有的資料沒有被刪除，也沒有改動。請按「重試」。如果仍然失敗，請先下載原有資料作備份。', true); }
   const flushNow = () => { if (Q && Q.cur) Q.flushDraft().catch(() => { }); if (Q && corrId) flushCorr().catch(() => { }); };
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushNow(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') { if (Q) Q.qPause(); flushNow(); }
+    else if (Q && inS && !res && Q.cur && Q.cur.phase === 'ask') Q.qStart(Q.cur.id + ':' + Q.cur.i);   // time away from the page is not response time
+  });
   window.addEventListener('pagehide', flushNow);
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => { });
   if (window.speechSynthesis) speechSynthesis.getVoices();
