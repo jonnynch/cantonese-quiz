@@ -154,17 +154,17 @@ test('page: opens on the learner picker, enters no learning screen until one is 
   assert.match(main(dom), /選擇學習者/); assert.match(main(dom), /小明/); assert.match(main(dom), /小美/); assert.match(main(dom), /新增學習者/);
   assert.doesNotMatch(main(dom), /甲組|乙組/); assert.equal(nav(dom), '');                      // no learning screens, no tabs
   await dom.window.eval(`selectProfile('${L['小明'].id}')`); await tick();
-  assert.match(nav(dom), /小明/); assert.match(nav(dom), /切換學習者/); assert.match(main(dom), /甲組/); assert.doesNotMatch(main(dom), /乙組/);
+  assert.match(nav(dom), /小明/); assert.match(nav(dom), /切換學習者/); assert.match(main(dom), /甲組/); assert.match(main(dom), /乙組/);   // the levels are shared: every learner sees all of them
   dom.window.eval("start('read','L-" + L['小明'].id + "','practice')"); await tick();         // A has an unfinished session...
   dom.window.eval('mark(true)'); await tick(); assert.match(main(dom), /2 \/ 2/);
   const qA = dom.window.eval('Q'); await dom.window.eval('switchLearner()'); await tick();
   assert.match(main(dom), /選擇學習者/); assert.doesNotMatch(main(dom), /甲組|2 \/ 2/);        // ...nothing of it stays on screen
   assert.ok(!dom.window.eval('Q')); assert.equal(qA.closed, true);
   await dom.window.eval(`selectProfile('${L['小美'].id}')`); await tick();
-  assert.match(nav(dom), /小美/); assert.doesNotMatch(nav(dom), /小明/); assert.match(main(dom), /乙組/); assert.doesNotMatch(main(dom), /甲組/);
+  assert.match(nav(dom), /小美/); assert.doesNotMatch(nav(dom), /小明/); assert.match(main(dom), /乙組/); assert.match(main(dom), /甲組/);
   dom.window.eval("go('practice')"); await tick(); assert.doesNotMatch(main(dom), /有未完成/); // A's unfinished session is not visible to B
-  assert.equal(dom.window.eval('Q.cur'), null); assert.equal(dom.window.eval('Q.levels.length'), 1);
-  dom.window.eval("go('hist')"); await tick(); assert.doesNotMatch(main(dom), /甲組/);
+  assert.equal(dom.window.eval('Q.cur'), null); assert.equal(dom.window.eval('Q.levels.length'), 2);   // shared content (each learner's own progress is separate)
+  dom.window.eval("go('hist')"); await tick(); assert.doesNotMatch(main(dom), /2 \/ 2|小明/);   // nothing of the other learner's progress
   dom.window.close();
   // A's session is still there for A
   const dom2 = await openPage(idb, undefined, undefined, L['小明'].id);                        // refresh in the tab where 小明 was active

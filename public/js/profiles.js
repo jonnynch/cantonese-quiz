@@ -1,7 +1,8 @@
-/* Learner profiles.
-   Design: every learner owns a separate IndexedDB database (levels, characters, records, images, unfinished session, draft),
-   so one learner's data can never be read, written or deleted through another learner's store. The app-wide profile list
-   lives in its own small registry database. The database that existed before profiles (`cantonese-quiz`) is adopted as the
+/* Learner profiles and shared content.
+   Design: LEARNING CONTENT (levels and their characters/words) is shared: it lives once in the app-wide registry database, outside every
+   profile, so it exists with or without profiles and every profile sees the same content. LEARNING PROGRESS is per learner: every learner owns
+   a separate IndexedDB database (records, images, unfinished sessions, drafts, corrections, adaptive statistics), so one learner's data can
+   never be read, written or deleted through another learner's store. The app-wide profile list lives in the same registry database. The database that existed before profiles (`cantonese-quiz`) is adopted as the
    default learner's database in place: no learner data is copied or rewritten. */
 (function (root, factory) {
   const dep = (typeof module === 'object' && module.exports) ? require('./storage.js') : root.CQStorage;
@@ -19,8 +20,12 @@
   function openRegistryDb(idb) {
     return new Promise((resolve, reject) => {
       if (!idb) return reject(new S.StorageError('unavailable', 'IndexedDB is not available'));
-      let rq; try { rq = idb.open(REGISTRY_DB, 1); } catch (e) { return reject(S.wrap(e, 'unavailable')); }
-      rq.onupgradeneeded = () => { const db = rq.result; db.createObjectStore('profiles', { keyPath: 'id' }); db.createObjectStore('meta'); };
+      let rq; try { rq = idb.open(REGISTRY_DB, 2); } catch (e) { return reject(S.wrap(e, 'unavailable')); }
+      rq.onupgradeneeded = e => {
+        const db = rq.result;
+        if (e.oldVersion < 1) { db.createObjectStore('profiles', { keyPath: 'id' }); db.createObjectStore('meta'); }
+        if (e.oldVersion < 2) db.createObjectStore('levels', { keyPath: 'id' });          // v2: the shared learning content (data only added)
+      };
       rq.onsuccess = () => { const db = rq.result; db.onversionchange = () => db.close(); resolve(db); };
       rq.onerror = () => reject(S.wrap(rq.error, 'unavailable'));
       rq.onblocked = () => reject(new S.StorageError('blocked', 'Registry upgrade blocked'));
@@ -34,7 +39,7 @@
     if (!AVATARS.includes(avatar)) throw new ProfileError('avatar', '請選擇一個頭像');
     return { name: n, avatar };
   }
-  const deleteMessage = name => '確定要永久刪除「' + name + '」嗎？\n這個學習者所有的級別、字、練習和考試紀錄、手寫圖片和未完成的測驗都會被刪除，無法復原。其他學習者的資料不受影響。\n（如果只是暫時不用，可以選擇「封存學習者」。）';
+  const deleteMessage = name => '確定要永久刪除「' + name + '」嗎？\n這個學習者所有的練習和考試紀錄、學習統計、手寫圖片和未完成的測驗都會被刪除，無法復原。學習內容（級別和字）和其他學習者的資料不受影響。\n（如果只是暫時不用，可以選擇「封存學習者」。）';
 
   class ProfileManager {
     constructor(idb, o) {
@@ -45,6 +50,22 @@
     getMeta(k) { return this._tx('readonly', (p, m, out) => { m.get(k).onsuccess = e => { out.v = e.target.result; }; }); }
     setMeta(k, v) { return this._tx('readwrite', (p, m) => { m.put(v, k); }); }
     _put(p) { return this._tx('readwrite', (st) => { st.put(p); }); }
+
+    /* ---- shared content (global: independent of profiles, available before the first profile exists) ----
+       A content provider for the Quiz/SharedContent classes: { loadLevels, saveLevels, mergeLevels }. */
+    get content() {
+      if (!this._content) this._content = {
+        loadLevels: () => S.run(this.db, ['levels'], 'readonly', (lv, out) => { lv.getAll().onsuccess = e => { out.v = e.target.result; }; }),
+        /* replace the whole shared content in one transaction (levels carry their order in `ord`) */
+        saveLevels: levels => S.run(this.db, ['levels'], 'readwrite', (lv) => { lv.clear(); levels.forEach((x, i) => lv.put({ ...x, ord: i })); }),
+        /* merge: changed levels are written whole, new levels are appended after the existing ones */
+        mergeLevels: ({ newLevels, updatedLevels }) => S.run(this.db, ['levels'], 'readwrite', (lv) => {
+          updatedLevels.forEach(x => lv.put(x));
+          lv.count().onsuccess = e => { newLevels.forEach((x, i) => lv.put({ ...x, ord: e.target.result + i })); };
+        }),
+      };
+      return this._content;
+    }
     _all() { return this._tx('readonly', (st, m, out) => { st.getAll().onsuccess = e => { out.v = e.target.result; }; }); }
 
     /* which: 'active' (default, what the learner picker shows) | 'archived' | 'all'. Profiles being deleted are never listed. */
@@ -144,5 +165,53 @@
     return { status: 'adopted', profile: p };
   }
 
-  return { REGISTRY_DB, LEGACY_DB, LEGACY_PROFILE_ID, AVATARS, AVATAR_EMOJI, MAX_NAME, ProfileError, ProfileManager, adoptLegacy };
+  /* ---------- moving the content that used to be copied into every profile into the shared content ----------
+     Deterministic merge (documented rules):
+       - a level is identified by its id; the same id in several places is ONE level;
+       - versions of the same level: the one with the newest `modified` wins (name, description, order of its characters); a tie goes to the
+         existing shared content, then to the earlier created learner; characters of the other versions that the winner lacks are ADDED (nothing is lost);
+       - a character is identified by its id; if a character id appears in two different levels, the first one is kept;
+       - levels that merely have the same name but different ids are different levels: they are all kept (never guessed to be the same).
+     Order: shared content first, then each learner in creation order; levels in their own order. */
+  function mergeLevelSources(sources) {
+    const order = [], versions = new Map();
+    sources.forEach((src, rank) => src.slice().sort((a, b) => (a.ord || 0) - (b.ord || 0)).forEach(l => {
+      if (!versions.has(l.id)) { versions.set(l.id, []); order.push(l.id); }
+      versions.get(l.id).push({ rank, l });
+    }));
+    const seenChars = new Set(), out = [];
+    order.forEach(id => {
+      const vs = versions.get(id).slice().sort((a, b) => ((b.l.modified || 0) - (a.l.modified || 0)) || (a.rank - b.rank)), w = vs[0].l;
+      const chars = [], addChars = l => (l.chars || []).forEach(c => { if (c && c.id && !seenChars.has(c.id)) { seenChars.add(c.id); chars.push({ id: c.id, c: c.c, jp: c.jp || '', w: c.w || '', wjp: c.wjp || '', m: c.m || '' }); } });
+      vs.forEach(v => addChars(v.l));
+      const created = vs.map(v => v.l.created).filter(x => Number.isFinite(x) && x > 0);
+      out.push({ id, name: w.name, desc: w.desc || '', chars, created: created.length ? Math.min(...created) : (w.created || 0), modified: w.modified || 0 });
+    });
+    return out;
+  }
+  const stripOrd = a => JSON.stringify(a.slice().sort((x, y) => (x.ord || 0) - (y.ord || 0)).map(({ ord, ...r }) => r));
+  /* Idempotent (a finished migration is skipped; a partly finished one is simply continued) and safe: (1) read the shared content and every
+     profile's levels, (2) persist the merged result in the shared store, (3) read it back and compare, (4) ONLY THEN remove the old copies from the
+     profiles, (5) record completion. Any failure leaves every original copy in place and the migration is retried at the next start. */
+  async function migrateSharedContent(mgr) {
+    const done = await mgr.getMeta('sharedContent');
+    if (done && done.state === 'done') return { status: 'skipped' };
+    const profiles = await mgr.list('all'), sources = [], holders = [];
+    const shared = await mgr.content.loadLevels(); if (shared.length) sources.push(shared);
+    try {
+      for (const p of profiles) {
+        const st = await mgr.openStore(p.id, { allowArchived: true }), lv = (await st.loadAll()).levels;
+        if (lv.length) { sources.push(lv); holders.push({ p, st }); }
+      }
+      const merged = mergeLevelSources(sources);
+      if (stripOrd(merged) !== stripOrd(shared)) await mgr.content.saveLevels(merged);
+      const back = await mgr.content.loadLevels();
+      if (stripOrd(back) !== stripOrd(merged)) throw new S.StorageError('migration', 'Shared content could not be verified after saving');
+      for (const h of holders) await h.st.saveLevels([]);                 // only now are the per-profile copies removed
+      await mgr.setMeta('sharedContent', { state: 'done', at: mgr.now(), levels: merged.length, profiles: profiles.length });
+      return { status: holders.length ? 'migrated' : 'none', levels: merged.length };
+    } finally { profiles.forEach(p => mgr.closeStore(p.id)); }
+  }
+
+  return { REGISTRY_DB, LEGACY_DB, LEGACY_PROFILE_ID, migrateSharedContent, mergeLevelSources, AVATARS, AVATAR_EMOJI, MAX_NAME, ProfileError, ProfileManager, adoptLegacy };
 });

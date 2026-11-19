@@ -1,9 +1,10 @@
 /* UI layer. All persistence goes through CQCore.Quiz -> CQStorage (IndexedDB). */
 let corrId = null, corrIdx = 0, corrSum = false, cs = [], cTimers = {}, cFail = new Set(), autoKey = null, speechUnlocked = false;
-let Q, store, mgr, profile = null, pview = 'pick', tab = 'levels', lid = null, rid = null, inS = false, res = null, cv, cx, drawing = false, dirty = false;
+let Q, store, mgr, CT, bk = null, profile = null, pview = 'pick', tab = 'levels', lid = null, rid = null, inS = false, res = null, cv, cx, drawing = false, dirty = false;
 const $ = s => document.querySelector(s);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const lv = id => Q.level(id);
+const lv = id => (Q || CT).level(id);
+const UID = () => (Q || CT).uid();
 const fd = t => new Date(t).toLocaleString('zh-HK');
 const NAME = { read: { practice: '讀字練習', revision: '讀字溫習', exam: '讀字考試' }, write: { practice: '聽音寫字', revision: '寫字溫習', exam: '寫字考試' } };
 const LB = r => NAME[r.kind][r.mode];
@@ -32,11 +33,11 @@ async function retrySave() { const q = Q; if (q.busy) return; after(await q.retr
 
 const AV = a => (CQProfiles.AVATAR_EMOJI[a] || '🙂');
 function render() {
-  if (!Q) { $('#nav').innerHTML = ''; (pview === 'manage' ? vManage : vPickProfile)($('#main')); return; }
+  if (!Q) { $('#nav').innerHTML = ''; ({ manage: vManage, content: vLevels, backup: vBackup }[pview] || vPickProfile)($('#main')); return; }
   $('#nav').innerHTML = `<button class="who" onclick="switchLearner()" aria-label="切換學習者"><span class="av1">${AV(profile.avatar)}</span> ${esc(profile.name)} <small>切換學習者</small></button>` + [['levels', '級別管理'], ['practice', '練習'], ['exam', '考試'], ['hist', '學習紀錄'], ['set', '設定']].map(([k, t]) => `<button class="${tab === k && !inS ? 'on' : ''}" onclick="go('${k}')">${t}</button>`).join('');
   const m = $('#main'); if (corrId) { vCorrection(m); return; }
   if (inS) { sess(m); hydrate(m); return; }
-  ({ levels: vLevels, practice: vPick, exam: vPick, hist: vHist, set: vSet })[tab](m); hydrate(m);
+  ({ levels: vLevels, practice: vPick, exam: vPick, hist: vHist, set: vSet, backup: vBackup })[tab](m); hydrate(m);
 }
 function hydrate(root) {
   const st0 = store;
@@ -70,7 +71,7 @@ function form(title, fields, vals, cb) {
     btn.disabled = false;
   };
 }
-async function commitLevels(fn) { const q = Q, r = await q.mutateLevels(fn); if (r.busy) throw Object.assign(new Error('busy'), { code: 'busy' }); if (!r.ok) throw r.error; if (q === Q) render(); }
+async function commitLevels(fn) { const q = Q, r = await (q ? q.mutateLevels(fn) : CT.mutate(fn)); if (r.busy) throw Object.assign(new Error('busy'), { code: 'busy' }); if (!r.ok) throw r.error; if (q === Q) render(); }
 /* ---------- level management ---------- */
 function vLevels(m) {
   if (lid && lv(lid)) {
@@ -78,10 +79,10 @@ function vLevels(m) {
     m.innerHTML = `<div class="row"><button class="b" onclick="lid=null;render()">返回</button><h2 style="margin:0">${esc(L.name)} <small>${L.chars.length} 字</small></h2></div>${L.desc ? `<p>${esc(L.desc)}</p>` : ''}<div class="row"><button class="b p" onclick="charForm()">新增字</button></div><div class="grid">` +
       L.chars.map(c => `<div class="card"><div class="han mid">${esc(c.c)}</div><div>${esc(c.jp)}</div><div>${esc(c.w)} <small>${esc(c.wjp)}</small></div><div><small>${esc(c.m)}</small></div><div class="row"><button class="b" onclick="charForm('${c.id}')">編輯</button><button class="b r" onclick="delChar('${c.id}')">刪除</button></div></div>`).join('') + '</div>' + (L.chars.length ? '' : '<p>這個級別還沒有字。</p>'); return;
   }
-  m.innerHTML = `<div class="row"><h2 style="margin:0">級別管理</h2><button class="b p" onclick="addLevel()">新增級別</button></div>` +
-    (Q.levels.map(L => `<div class="card"><h3>${esc(L.name)} <small>${L.chars.length} 字</small></h3>${L.desc ? `<p>${esc(L.desc)}</p>` : ''}<div class="row"><button class="b p" onclick="lid='${L.id}';render()">查看</button><button class="b" onclick="renLevel('${L.id}')">重新命名</button><button class="b r" onclick="delLevel('${L.id}')">刪除</button></div></div>`).join('') || '<p>還沒有級別，請先新增。</p>');
+  m.innerHTML = `<div class="row">${Q ? '' : `<button class="b" onclick="pview='pick';render()">返回</button>`}<h2 style="margin:0">級別管理</h2><button class="b p" onclick="addLevel()">新增級別</button></div><p><small>學習內容由所有學習者共用，修改後每位學習者都會看到。</small></p>` +
+    ((Q || CT).levels.map(L => `<div class="card"><h3>${esc(L.name)} <small>${L.chars.length} 字</small></h3>${L.desc ? `<p>${esc(L.desc)}</p>` : ''}<div class="row"><button class="b p" onclick="lid='${L.id}';render()">查看</button><button class="b" onclick="renLevel('${L.id}')">重新命名</button><button class="b r" onclick="delLevel('${L.id}')">刪除</button></div></div>`).join('') || '<p>還沒有級別，請先新增。</p>');
 }
-function addLevel() { form('新增級別', [['name', '名稱'], ['desc', '說明（可選）']], {}, o => { if (!o.name) return false; const t = Date.now(); return commitLevels(ls => ls.push({ id: Q.uid(), name: o.name, desc: o.desc, chars: [], created: t, modified: t })); }) }
+function addLevel() { form('新增級別', [['name', '名稱'], ['desc', '說明（可選）']], {}, o => { if (!o.name) return false; const t = Date.now(); return commitLevels(ls => ls.push({ id: UID(), name: o.name, desc: o.desc, chars: [], created: t, modified: t })); }) }
 function renLevel(id) { const L = lv(id); form('重新命名', [['name', '名稱'], ['desc', '說明（可選）']], L, o => { if (!o.name) return false; return commitLevels(ls => { const x = ls.find(l => l.id === id); x.name = o.name; x.desc = o.desc; x.modified = Date.now(); }); }) }
 async function delLevel(id) {
   if (!confirm('刪除這個級別和裏面所有的字？此動作無法復原。（已有的學習紀錄和未完成的測驗會保留。）')) return;
@@ -91,7 +92,7 @@ function charForm(id) {
   const L = lv(lid), c = id ? L.chars.find(x => x.id === id) : {};
   form(id ? '編輯字' : '新增字', [['c', '字'], ['jp', '粵拼'], ['w', '詞語'], ['wjp', '詞語粵拼'], ['m', '意思']], c, o => {
     if ([...o.c].length !== 1) { alert('「字」欄位請輸入一個繁體字'); return false; }
-    return commitLevels(ls => { const x = ls.find(l => l.id === lid); if (id) Object.assign(x.chars.find(y => y.id === id), o); else x.chars.push({ id: Q.uid(), ...o }); x.modified = Date.now(); });
+    return commitLevels(ls => { const x = ls.find(l => l.id === lid); if (id) Object.assign(x.chars.find(y => y.id === id), o); else x.chars.push({ id: UID(), ...o }); x.modified = Date.now(); });
   });
 }
 async function delChar(id) {
@@ -256,32 +257,68 @@ function vHist(m) {
 }
 /* ---------- settings: backup ---------- */
 function vSet(m) {
-  m.innerHTML = `<h2>設定</h2><div class="card"><h3>學習者：${AV(profile.avatar)} ${esc(profile.name)}</h3><div class="row"><button class="b p" onclick="switchLearner()">切換學習者</button><button class="b" onclick="manageLearners()">管理學習者</button></div></div><div class="card"><h3>安裝到主畫面</h3><p><small>iPad／iPhone：在 Safari 按「分享」，再選「加入主畫面」。Android／Chrome：選單 →「安裝應用程式」。安裝後，打開過一次的應用程式可以在沒有網絡時使用，所有資料都儲存在這部裝置上。</small></p></div><div class="card"><h3>匯出備份</h3><p><small>包括「${esc(profile.name)}」的級別、字、紀錄、手寫圖片、未完成的測驗、未交的手寫草稿、寫五次練習和每個字的學習統計。</small></p><button class="b p" onclick="exp()">匯出</button><div id="emsg" class="row"></div></div>
-  <div class="card"><h3>匯入備份</h3><p><small>只會影響「${esc(profile.name)}」的資料。</small></p><div class="row"><label><input type="radio" name="im" value="merge" checked style="width:auto;min-height:0"> 合併（保留現有資料）</label><label><input type="radio" name="im" value="replace" style="width:auto;min-height:0"> 取代全部資料</label></div><input type="file" id="fi" accept=".json,application/json"><div id="imsg"></div></div>`;
-  $('#fi').onchange = e => { if (e.target.files[0]) imp(e.target.files[0]); e.target.value = ''; };
+  m.innerHTML = `<h2>設定</h2><div class="card"><h3>學習者：${AV(profile.avatar)} ${esc(profile.name)}</h3><div class="row"><button class="b p" onclick="switchLearner()">切換學習者</button><button class="b" onclick="manageLearners()">管理學習者</button></div></div><div class="card"><h3>安裝到主畫面</h3><p><small>iPad／iPhone：在 Safari 按「分享」，再選「加入主畫面」。Android／Chrome：選單 →「安裝應用程式」。安裝後，打開過一次的應用程式可以在沒有網絡時使用，所有資料都儲存在這部裝置上。</small></p></div><div class="card"><h3>內容與備份</h3><p><small>學習內容（級別和字）由所有學習者共用；學習進度屬於各自的學習者。可以分開匯出和匯入。</small></p><div class="row"><button class="b p" onclick="openBackup()">開啟</button></div></div>`;
 }
-async function exp() {
+/* ---------- content & backup (shared content and per-learner progress are separate; works with or without a learner) ---------- */
+const list = (a, n) => a.slice(0, n).map(x => `<li>${esc(x)}</li>`).join('') + (a.length > n ? `<li>…還有 ${a.length - n} 項</li>` : '');
+async function openBackup() { bk = null; if (Q) { await go('backup'); } else { pview = 'backup'; render(); } }
+function bkBack() { bk = null; if (Q) go('set'); else { pview = 'pick'; render(); } }
+function vBackup(m) {
+  Promise.all([mgr.list('all'), CT.load()]).then(([ps]) => {
+    if ((Q ? tab !== 'backup' : pview !== 'backup')) return;
+    const nL = CT.levels.length, nC = CT.levels.reduce((n, l) => n + l.chars.length, 0);
+    m.innerHTML = `<div class="row"><button class="b" onclick="bkBack()">返回</button><h2 style="margin:0">內容與備份</h2></div>` +
+      `<div class="card"><h3>匯出</h3><p><small>學習內容只會匯出一次；學習進度按學習者分開匯出。沒有學習者也可以匯出學習內容。</small></p>` +
+      `<label class="line"><input type="checkbox" id="xc" checked style="width:auto;min-height:0"> <span>學習內容（${nL} 個級別、${nC} 個字）</span></label>` +
+      ps.map(p => `<label class="line"><input type="checkbox" class="xp" value="${esc(p.id)}" ${p.archivedAt ? '' : 'checked'} style="width:auto;min-height:0"> <span>${AV(p.avatar)} ${esc(p.name)} 的學習進度${p.archivedAt ? '（已封存）' : ''}</span></label>`).join('') +
+      `<div class="row"><button class="b p" onclick="bkExport()">匯出</button></div><div id="emsg"></div></div>` +
+      `<div class="card"><h3>匯入</h3><p><small>先選擇檔案，再決定要匯入的內容和進度。舊版備份檔也可以匯入。</small></p><input type="file" id="fi" accept=".json,application/json"><div id="imsg">${bk ? bkOptions(ps) : ''}</div></div>`;
+    $('#fi').onchange = e => { if (e.target.files[0]) bkLoad(e.target.files[0]); e.target.value = ''; };
+  }).catch(e => { m.innerHTML = `<p class="warn">無法讀取資料（${esc(reason(e))}）。</p>`; });
+}
+async function bkExport() {
   try {
-    const q = Q, { json, missingImages } = await q.exportBackup(); if (q !== Q) return;
+    const ids = [...document.querySelectorAll('.xp:checked')].map(x => x.value), withContent = $('#xc').checked;
+    if (!withContent && !ids.length) { $('#emsg').innerHTML = '<span class="warn">請至少選擇一項要匯出的資料。</span>'; return; }
+    const { json, missingImages } = await CQBackup.buildExport(mgr, CT, { includeContent: withContent, profileIds: ids, getQuiz: id => (Q && profile && profile.id === id ? Q : null) });
     const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(json)], { type: 'application/json' }));
     a.download = '識字備份-' + new Date().toISOString().slice(0, 10) + '.json'; document.body.appendChild(a); a.click(); a.remove();
-    $('#emsg').innerHTML = missingImages ? `<span class="warn">有 ${missingImages} 張手寫圖片找不到，備份中沒有包括這些圖片。</span>` : '';
+    $('#emsg').innerHTML = missingImages ? `<span class="warn">有 ${missingImages} 張手寫圖片找不到，備份中沒有包括這些圖片。</span>` : '<span class="g">已匯出。</span>';
   } catch (e) { $('#emsg').innerHTML = `<span class="warn">匯出失敗（${esc(reason(e))}）。</span>`; }
 }
-const list = (a, n) => a.slice(0, n).map(x => `<li>${esc(x)}</li>`).join('') + (a.length > n ? `<li>…還有 ${a.length - n} 項</li>` : '');
-async function imp(f) {
-  const msg = $('#imsg'), mode = document.querySelector('input[name=im]:checked').value; let json;
+async function bkLoad(f) {
+  const msg = $('#imsg'); let json, parsed;
   try { json = JSON.parse(await f.text()); } catch (e) { msg.innerHTML = '<p class="warn">匯入失敗：檔案已損毀或格式不正確。現有資料沒有改動。</p>'; return; }
-  let r; const q = Q;
-  try { r = await q.importBackup(json, mode, confirm); }
-  catch (e) {
-    msg.innerHTML = e.list ? `<p class="warn">匯入失敗，現有資料沒有改動：</p><ul class="warn">${list(e.list, 10)}</ul>` : `<p class="warn">匯入失敗（${esc(reason(e))}）。現有資料沒有改動。</p>`; return;
-  }
-  if (q !== Q || r.cancelled) return;
-  if (r.aborted) { msg.innerHTML = `<p class="warn">沒有匯入任何資料：發現 ${r.conflicts.length} 項衝突，現有資料沒有改動。</p><ul class="warn">${list(r.conflicts, 10)}</ul><p><small>如要使用備份的內容，請先匯出目前的資料，再選擇「取代全部資料」。</small></p>`; return; }
-  msg.innerHTML = `<p class="g">${r.mode === 'replace' ? '已取代全部資料' : '已合併'}：新增級別 ${r.added.levels}、新增字 ${r.added.chars}、新增紀錄 ${r.added.records}${r.added.sessions ? `、未完成的測驗 ${r.added.sessions}` : ''}${r.added.corrections ? `、寫五次練習 ${r.added.corrections}` : ''}${r.identical ? `；${r.identical} 項資料已存在（相同），已略過` : ''}。</p>` +
-    (r.conflicts.length ? `<p class="warn">發現 ${r.conflicts.length} 項衝突，沒有覆蓋現有資料：</p><ul class="warn">${list(r.conflicts, 10)}</ul>` : '') +
-    (r.warnings.length ? `<ul class="warn">${list(r.warnings, 10)}</ul>` : '');
+  try { parsed = CQBackup.parse(json); } catch (e) { msg.innerHTML = e.list ? `<p class="warn">匯入失敗，現有資料沒有改動：</p><ul class="warn">${list(e.list, 10)}</ul>` : `<p class="warn">匯入失敗（${esc(reason(e))}）。現有資料沒有改動。</p>`; return; }
+  if (!parsed.content && !parsed.profiles.length) { msg.innerHTML = '<p class="warn">這個備份沒有可以匯入的內容或進度。</p>'; return; }
+  const ps = await mgr.list('all');
+  bk = { parsed, content: parsed.content ? 'merge' : 'skip', targets: CQBackup.suggestTargets(parsed, ps) }; msg.innerHTML = bkOptions(ps);
+}
+function bkOptions(ps) {
+  const P = bk.parsed, nC = P.content ? P.content.reduce((n, l) => n + l.chars.length, 0) : 0;
+  let h = '';
+  if (P.content) h += `<div class="card"><h3>學習內容</h3><p>備份中有 ${P.content.length} 個級別、${nC} 個字。匯入後所有學習者（包括之後新增的）都會使用。</p>` +
+    [['merge', '合併（保留現有內容，只加入新的）'], ['replace', '取代現有的學習內容'], ['skip', '不匯入學習內容']].map(([v, t]) => `<label class="line"><input type="radio" name="bc" value="${v}" ${bk.content === v ? 'checked' : ''} onchange="bk.content=this.value" style="width:auto;min-height:0"> <span>${t}</span></label>`).join('') + '</div>';
+  if (P.profiles.length) h += `<div class="card"><h3>學習進度</h3><p><small>每位學習者的進度只會匯入到你選擇的學習者；預設只匯入編號相同的學習者，其他的會略過。</small></p>` +
+    P.profiles.map((p, i) => { const s = p.summary, t = bk.targets[i], matched = p.profileId && ps.some(l => l.id === p.profileId);
+      return `<div class="card"><b>${p.legacy ? '舊版備份中的學習進度' : esc(p.profileName)}</b> <small>（${s.records} 筆紀錄${s.corrections ? '、' + s.corrections + ' 個寫五次練習' : ''}${s.sessions ? '、' + s.sessions + ' 個未完成的測驗' : ''}）${matched ? '・本機有相同編號的學習者' : p.legacy ? '・舊版檔案沒有記錄屬於哪位學習者' : '・本機沒有這位學習者'}</small>` +
+        `<select onchange="bk.targets[${i}]=this.value" aria-label="匯入到">` + `<option value="skip" ${t === 'skip' ? 'selected' : ''}>略過（不匯入進度）</option>` +
+        ps.map(l => `<option value="p:${esc(l.id)}" ${t === 'p:' + l.id ? 'selected' : ''}>匯入到「${esc(l.name)}」</option>`).join('') + `<option value="new" ${t === 'new' ? 'selected' : ''}>新增學習者${p.legacy ? '' : '「' + esc(p.profileName) + '」'}並匯入</option></select></div>`; }).join('') + '</div>';
+  return h + `<div class="row"><button class="b p" onclick="bkRun()">開始匯入</button><button class="b" onclick="bk=null;render()">取消</button></div>`;
+}
+async function bkRun() {
+  const msg = $('#imsg'), b = bk; if (!b) return;
+  if (b.content === 'replace' && !confirm('這會取代所有學習者共用的學習內容（級別和字）。學習進度不會被刪除。建議先匯出目前的資料。確定要取代嗎？')) return;
+  let r;
+  try { r = await CQBackup.apply(mgr, CT, b.parsed, { content: b.content, targets: b.targets, getQuiz: id => (Q && profile && profile.id === id ? Q : null) }); }
+  catch (e) { msg.innerHTML = e.list ? `<p class="warn">匯入失敗，現有資料沒有改動：</p><ul class="warn">${list(e.list, 10)}</ul>` : `<p class="warn">匯入失敗（${esc(reason(e))}）。</p>`; return; }
+  bk = null;
+  if (r.aborted) { msg.innerHTML = `<p class="warn">沒有匯入任何資料：學習內容發現 ${r.content.conflicts.length} 項衝突，現有資料沒有改動。</p><ul class="warn">${list(r.content.conflicts, 10)}</ul><p><small>可以選擇「取代現有的學習內容」或「不匯入學習內容」後再試。</small></p>`; return; }
+  const c = r.content, ST = { imported: '已匯入', aborted: '沒有匯入（有衝突）', failed: '匯入失敗', skipped: '已略過' };
+  let h = c.status === 'skipped' ? '' : `<p class="g">學習內容${c.status === 'replaced' ? '已取代' : '已合併'}：${c.added.levels} 個級別、${c.added.chars} 個字${c.identical ? `（${c.identical} 項已存在，已略過）` : ''}。所有學習者都可以使用。</p>`;
+  h += r.profiles.map(p => `<p class="${p.status === 'imported' ? 'g' : p.status === 'skipped' ? '' : 'warn'}"><b>${esc(p.name)}</b>：${ST[p.status]}${p.created ? '（已新增學習者）' : ''}${p.status === 'imported' ? `（新增紀錄 ${p.added.records}${p.added.sessions ? '、未完成的測驗 ' + p.added.sessions : ''}${p.added.corrections ? '、寫五次練習 ' + p.added.corrections : ''}${p.identical ? '；' + p.identical + ' 項已存在' : ''}）` : ''}${p.error ? '（' + esc(p.error) + '）' : ''}</p>` +
+    (p.conflicts && p.conflicts.length ? `<ul class="warn">${list(p.conflicts, 6)}</ul>` : '') + (p.warnings && p.warnings.length ? `<ul class="warn">${list(p.warnings, 6)}</ul>` : '')).join('');
+  msg.innerHTML = h || '<p>沒有匯入任何資料。</p>';
 }
 /* ---------- startup ---------- */
 function fatal(title, detail, legacy) {
@@ -392,7 +429,7 @@ async function applyUpdate() {
 /* ---------- learners: picking, switching, managing ---------- */
 const ACTIVE_KEY = 'cq-active-profile';   // sessionStorage: survives a page refresh in this tab, forgotten when the tab/app is closed
 function resetLearnerState() {            // nothing of the previous learner may stay in memory or on screen
-  tab = 'levels'; lid = null; rid = null; inS = false; res = null; dirty = false; drawing = false; cv = cx = null;
+  bk = null; tab = 'levels'; lid = null; rid = null; inS = false; res = null; dirty = false; drawing = false; cv = cx = null;
   corrId = null; corrSum = false; cs = []; Object.values(cTimers).forEach(clearTimeout); cTimers = {}; cFail.clear(); autoKey = null;
   silence(); if (Q) Q.qPause(); hideErr(); document.querySelectorAll('.modal').forEach(d => d.remove());
   const t = $('#toast'); if (t) t.hidden = true;
@@ -416,7 +453,7 @@ async function selectProfile(id) {
   let st, p, q;
   try {
     p = await mgr.get(id); if (!p) throw new Error('missing');
-    st = await mgr.openStore(id); q = new CQCore.Quiz(st); await q.init();
+    st = await mgr.openStore(id); q = new CQCore.Quiz(st, { content: CT }); await q.init();
   } catch (e) { pview = 'pick'; pmsg = `<p class="warn">無法開啟這個學習者的資料（${esc(reason(e))}）。資料沒有被改動。</p>`; render(); return; }
   store = st; profile = p; Q = q; resetLearnerState();
   q.onDraftError = e => { if (q === Q) showDraftError(e); }; q.onDraftOk = () => { if (q === Q) hideErr(); };
@@ -430,7 +467,7 @@ function vPickProfile(m) {
     if (Q || pview !== 'pick') return;
     m.innerHTML = pmsg + `<h2>選擇學習者</h2><div class="grid">` + ps.map(p => `<button class="card pick" onclick="selectProfile('${p.id}')"><div class="av">${AV(p.avatar)}</div><div class="nm">${esc(p.name)}</div></button>`).join('') +
       `<button class="card pick add" onclick="profileForm()"><div class="av">＋</div><div class="nm">新增學習者</div></button></div>` +
-      (ps.length ? '' : '<p>還沒有學習者，請先新增。</p>') + `<div class="row"><button class="b" onclick="pview='manage';render()">管理學習者</button></div>`; pmsg = '';
+      (ps.length ? '' : '<p>還沒有學習者，請先新增。</p>') + `<div class="row"><button class="b" onclick="pview='manage';render()">管理學習者</button><button class="b" onclick="pview='content';lid=null;render()">學習內容</button><button class="b" onclick="openBackup()">內容與備份</button></div>`; pmsg = '';
   }).catch(e => { m.innerHTML = `<p class="warn">無法讀取學習者名單（${esc(reason(e))}）。</p>`; });
 }
 function vManage(m) {
@@ -471,6 +508,8 @@ async function boot() {
   catch (e) { return fatal('無法使用儲存空間', '這個瀏覽器目前無法使用儲存空間（IndexedDB），所以不能儲存資料。請不要使用私密瀏覽，或換一個瀏覽器再試。'); }
   try { await CQProfiles.adoptLegacy(mgr, window.localStorage); }
   catch (e) { return fatal('資料轉移未能完成', (e.parts && e.parts.length ? '核對時發現以下部分不相符：' + esc(e.parts.join('、')) + '。' : '') + '原有的資料沒有被刪除，也沒有改動。請按「重試」。如果仍然失敗，請先下載原有資料作備份。', true); }
+  try { await CQProfiles.migrateSharedContent(mgr); CT = new CQCore.SharedContent(mgr.content); await CT.load(); }
+  catch (e) { return fatal('資料轉移未能完成', '學習內容的整理未能完成。原有的資料沒有被刪除，也沒有改動。請按「重試」。', true); }
   const flushNow = () => { if (Q && Q.cur) Q.flushDraft().catch(() => { }); if (Q && corrId) flushCorr().catch(() => { }); };
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') { if (Q) Q.qPause(); flushNow(); }
