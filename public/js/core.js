@@ -418,18 +418,39 @@
       items: s.items.map(({ cid, c, jp, w, wjp, ok, imgId }) => ({ cid, c, jp, w, wjp, ok, imgId: imgId || null })) };   // (response times are not part of the record: they only feed the statistics) started is the ORIGINAL start: pausing/resuming never resets it
   }
 
+  /* ---------------- Shared content ----------------
+     The learning content (levels with their characters/words) is shared by every learner and exists without any learner. It is kept in memory
+     here and persisted through a provider ({ loadLevels, saveLevels, mergeLevels }); every Quiz of every learner reads the same object, so a change
+     is immediately visible to all of them. Changes are serialised and persisted BEFORE they are applied to memory. */
+  class SharedContent {
+    constructor(provider, o) { o = o || {}; this.provider = provider; this.uid = o.uid || defaultUid; this.levels = []; this._chain = Promise.resolve(); }
+    level(id) { return this.levels.find(l => l.id === id); }
+    async load() { this.levels = sortLevels(await this.provider.loadLevels()); return this; }
+    _run(fn) {                      // serialised; never leaves memory and storage out of step
+      const r = this._chain.then(async () => { try { await fn(); return { ok: true }; } catch (error) { return { ok: false, error }; } });
+      this._chain = r.then(() => { }); return r;
+    }
+    mutate(fn) { return this._run(async () => { const next = clone(this.levels); fn(next); next.forEach((l, i) => { l.ord = i; }); await this.provider.saveLevels(next); this.levels = sortLevels(next); }); }
+    replace(levels) { return this._run(async () => { const next = clone(levels); next.forEach((l, i) => { l.ord = i; }); await this.provider.saveLevels(next); this.levels = sortLevels(next); }); }
+    merge(plan) { return this._run(async () => { await this.provider.mergeLevels(plan); this.levels = sortLevels(await this.provider.loadLevels()); }); }
+  }
+
   /* ---------------- Quiz controller ----------------
      Rule: every mutation is computed on a copy, persisted, and only then applied to in-memory state. */
   class Quiz {
     constructor(store, o) {
       o = o || {};
-      this.store = store; this.uid = o.uid || defaultUid; this.now = o.now || Date.now; this.shuffle = o.shuffle || shuf; this.random = o.random || Math.random;
-      this.levels = []; this.records = []; this.sessions = []; this.stats = new Map(); this._q = null; this.cur = null; this.busy = false; this.retry = null; this.result = null;
+      this.store = store; this.content = o.content || null; this.uid = o.uid || defaultUid; this.now = o.now || Date.now; this.shuffle = o.shuffle || shuf; this.random = o.random || Math.random;
+      this._lv = []; this.records = []; this.sessions = []; this.stats = new Map(); this._q = null; this.cur = null; this.busy = false; this.retry = null; this.result = null;
       this.draftDelay = o.draftDelay == null ? 400 : o.draftDelay;
       this.onDraftError = null; this.onDraftOk = null; this.draftError = null;
       this._pend = null; this._timer = null; this._flushing = null; this._flushRunning = false; this.closed = false; this._lastAct = Promise.resolve(); this._cq = Promise.resolve(); this.corrections = []; this._seq = Date.now() * 1000;
     }
+    /* the levels are the SHARED content when a content object is given (the app), otherwise the learner store's own (stand-alone/legacy use) */
+    get levels() { return this.content ? this.content.levels : this._lv; }
+    set levels(v) { if (!this.content) this._lv = v; }
     async init() {
+      if (this.content) await this.content.load();
       this._set(await this.store.loadAll());
       // One-time start for data that existed before the statistics: build them from the completed records (counts only, no times).
       if (!this.stats.size && this.records.length && !(await this.store.getMeta('statsInit'))) {
@@ -437,7 +458,7 @@
       } else if (!(await this.store.getMeta('statsInit'))) await this.store.setMeta('statsInit', 1);
     }
     _set(d) {
-      this.levels = sortLevels(d.levels); this.records = d.records.slice().sort((a, b) => (a.date || 0) - (b.date || 0));
+      if (!this.content) this.levels = sortLevels(d.levels); this.records = d.records.slice().sort((a, b) => (a.date || 0) - (b.date || 0));
       this.sessions = (d.sessions || (d.session ? [d.session] : [])).slice();   // every unfinished session, newest first
       this.cur = (this.cur && this.sessions.find(x => x.id === this.cur.id)) || this.sessions[0] || null;   // cur = the session being worked on / most recent
       this.corrections = (d.corrections || []).slice().sort((a, b) => a.createdAt - b.createdAt);
@@ -527,6 +548,7 @@
 
     /* levels & characters */
     mutateLevels(fn) {
+      if (this.content) return this._act(async () => { const r = await this.content.mutate(fn); if (!r.ok) throw r.error; });
       return this._act(async () => { const next = clone(this.levels); fn(next); next.forEach((l, i) => { l.ord = i; }); await this.store.saveLevels(next); this.levels = sortLevels(next); });
     }
 
@@ -657,11 +679,12 @@
       const drafts = (all.drafts || []).filter(d => { const x = sessions.find(y => y.id === d.sid); return x && x.kind === 'write' && x.phase === 'ask' && x.i === d.qi && x.items[x.i].cid === d.cid; });   // never export an orphan/stale draft
       const corrections = (all.corrections || []).slice().sort((a, b) => a.createdAt - b.createdAt).map(c => ({ ...c, items: c.items.map(it => ({ ...it, attempts: it.attempts.map(a => {
         if (!a) return null; const data = im.get(a); if (data) return data; missing++; return null; }) })) }));
-      return { missingImages: missing, json: { format: 'cq-backup', version: 1, exported: new Date(this.now()).toISOString(), data: { levels: sortLevels(all.levels), records, sessions, drafts, corrections, stats } } };
+      return { missingImages: missing, json: { format: 'cq-backup', version: 1, exported: new Date(this.now()).toISOString(), data: { levels: this.content ? [] : sortLevels(all.levels), records, sessions, drafts, corrections, stats } } };
     }
     /* mode: 'merge' | 'replace'. Throws ImportError (validation) before touching any data. */
     async importBackup(json, mode, confirm, opts) {
       const data = validateBackup(json);
+      if (this.content && data.levels.length) throw new ImportError(['學習內容是所有學習者共用的，必須另外匯入，不能和學習進度一起匯入']);
       const ss = splitSessionImages(data.sessions), cc = splitCorrectionImages(data.corrections);
       if (mode === 'replace') {
         const openCorr = !data.provided.corrections && this.openCorrections().length;
@@ -695,5 +718,5 @@
     }
   }
 
-  return { Quiz, ADAPT, normStatsRow, applyAnswer, priority, learningStatus, weightedSample, statsFromRecords, classifyMs, ImportError, validateBackup, planMerge, splitImages, splitSessionImages, splitCorrectionImages, buildRecord, buildCorrection, correctionPosition, attemptsDone, formatDuration, durationOf, ATTEMPTS, shuf, clone };
+  return { Quiz, SharedContent, ADAPT, normStatsRow, applyAnswer, priority, learningStatus, weightedSample, statsFromRecords, classifyMs, ImportError, validateBackup, planMerge, splitImages, splitSessionImages, splitCorrectionImages, buildRecord, buildCorrection, correctionPosition, attemptsDone, formatDuration, durationOf, ATTEMPTS, shuf, clone };
 });

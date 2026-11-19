@@ -7,7 +7,7 @@ const { newIdb, CH, level } = require('./helpers');
 
 const PUB = path.join(__dirname, '../public');
 const pageHtml = () => fs.readFileSync(path.join(PUB, 'index.html'), 'utf8').replace(/<script src="([^"]+)"><\/script>/g, (_, f) => '<script>' + fs.readFileSync(path.join(PUB, f), 'utf8') + '</script>');
-const wait = ms => new Promise(r => setTimeout(r, ms)), tick = () => wait(25);
+const wait = ms => new Promise(r => setTimeout(r, ms)), tick = () => wait(60);
 const ev = (dom, code) => dom.window.eval(code);
 const ptr = { preventDefault() { }, pointerId: 1, clientX: 5, clientY: 5 };
 const stroke = el => { el.getBoundingClientRect = () => ({ left: 0, top: 0, width: 360, height: 360 }); el.onpointerdown(ptr); el.onpointerup(); };
