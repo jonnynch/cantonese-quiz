@@ -4,7 +4,7 @@
   const m = factory();
   if (typeof module === 'object' && module.exports) module.exports = m; else root.CQStorage = m;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
-  const DB_NAME = 'cantonese-quiz', DB_VERSION = 2, LEGACY_KEY = 'cantonese-quiz-v1';
+  const DB_NAME = 'cantonese-quiz', DB_VERSION = 3, LEGACY_KEY = 'cantonese-quiz-v1';
 
   class StorageError extends Error {
     constructor(code, message, cause) { super(message); this.name = 'StorageError'; this.code = code; this.cause = cause; }
@@ -30,6 +30,17 @@
           db.createObjectStore('meta');
         }
         if (old < 2) db.createObjectStore('corrections', { keyPath: 'id' });   // v2: writing-correction activities (data only added, never changed)
+        if (old < 3) {
+          // v3: several unfinished sessions (one row per session id) and one handwriting draft per session (keyed by session id).
+          // The single v2 session/draft rows are MOVED in this same versionchange transaction: if anything fails the whole upgrade
+          // is rolled back and the v2 data stays exactly as it was.
+          const un = db.createObjectStore('unfinished', { keyPath: 'id' }), dr = db.createObjectStore('drafts', { keyPath: 'sid' });
+          if (old >= 1) {
+            const ss = rq.transaction.objectStore('sessions');
+            ss.get('current').onsuccess = e => { const x = e.target.result; if (x && x.id) { un.put(x); ss.delete('current'); } };
+            ss.get('draft').onsuccess = e => { const x = e.target.result; if (x && x.sid) { dr.put(x); ss.delete('draft'); } };
+          }
+        }
       };
       rq.onsuccess = () => { const db = rq.result; db.onversionchange = () => db.close(); resolve(db); };
       rq.onerror = () => reject(wrap(rq.error, 'unavailable'));
@@ -50,18 +61,20 @@
       catch (e) { try { tx.abort(); } catch (_) { /* already finished */ } reject(wrap(e)); }
     });
   }
+  const sortSessions = a => a.slice().sort((x, y) => ((y.updatedAt || y.started || 0) - (x.updatedAt || x.started || 0)) || (x.id < y.id ? -1 : 1));   // newest first
   const putIfAbsent = (st, obj) => { const r = st.getKey(obj.id); r.onsuccess = () => { if (r.result === undefined) st.put(obj); }; };
 
   function createStore(db) {
     return {
       db,
+      /* `sessions` = every unfinished session. `session` = the most recently updated one (or null), kept for older callers. */
       loadAll() {
-        return run(db, ['levels', 'records', 'sessions', 'corrections'], 'readonly', (lv, rc, ss, cs, out) => {
+        return run(db, ['levels', 'records', 'unfinished', 'corrections'], 'readonly', (lv, rc, un, cs, out) => {
           const o = out.v = {};
           cs.getAll().onsuccess = e => { o.corrections = e.target.result; };
           lv.getAll().onsuccess = e => { o.levels = e.target.result; };
           rc.getAll().onsuccess = e => { o.records = e.target.result; };
-          ss.get('current').onsuccess = e => { o.session = e.target.result || null; };
+          un.getAll().onsuccess = e => { o.sessions = sortSessions(e.target.result); o.session = o.sessions[0] || null; };
         });
       },
       saveLevels(levels) {
@@ -71,23 +84,26 @@
           levels.forEach((l, i) => st.put({ ...l, ord: i }));   // `ord` keeps the user's level order
         });
       },
-      /* Persist the unfinished session (and optionally one new image) atomically. */
+      /* Persist one unfinished session (and optionally one new image) atomically. Only THIS session's draft is removed
+         (the draft of the question that was just answered); other unfinished sessions are never touched. */
       saveSession(session, image) {
-        return run(db, ['sessions', 'images'], 'readwrite', (ss, im) => { if (image) im.put(image); ss.put(session, 'current'); ss.delete('draft'); });
+        return run(db, ['unfinished', 'drafts', 'images'], 'readwrite', (un, dr, im) => { if (image) im.put(image); un.put(session); dr.delete(session.id); });
       },
-      /* Start a new session; if replacing an old (explicitly discarded) one, remove its images in the same transaction. */
+      /* Start a new session next to the existing ones. Only if the caller explicitly replaces one (confirmed duplicate) is that
+         session removed, with its images and draft, in the same transaction. */
       startSession(session, oldSid) {
-        return run(db, ['sessions', 'images'], 'readwrite', (ss, im) => {
-          if (oldSid) im.index('sid').getAllKeys(oldSid).onsuccess = e => e.target.result.forEach(k => im.delete(k));
-          ss.put(session, 'current'); ss.delete('draft');
+        return run(db, ['unfinished', 'drafts', 'images'], 'readwrite', (un, dr, im) => {
+          if (oldSid) { im.index('sid').getAllKeys(oldSid).onsuccess = e => e.target.result.forEach(k => im.delete(k)); un.delete(oldSid); dr.delete(oldSid); }
+          un.put(session); dr.delete(session.id);
         });
       },
-      /* Finish: write the completed record and remove the unfinished session in ONE transaction. */
+      /* Finish: write the completed record and remove the unfinished session in ONE transaction. A record is never overwritten:
+         it is added only if absent (its id is the session id), so a repeated completion can never create or change a record. */
       /* The optional writing-correction activity is created in the SAME transaction (put-if-absent: its id is derived from the
          record id, so it can never be created twice). */
       completeSession(record, correction) {
-        return run(db, ['records', 'sessions', 'corrections'], 'readwrite', (rc, ss, cs) => {
-          rc.put(record); ss.delete('current'); ss.delete('draft'); if (correction) putIfAbsent(cs, correction);
+        return run(db, ['records', 'unfinished', 'drafts', 'corrections'], 'readwrite', (rc, un, dr, cs) => {
+          putIfAbsent(rc, record); un.delete(record.id); dr.delete(record.id); if (correction) putIfAbsent(cs, correction);
         });
       },
       /* One correction attempt: the updated activity, the new image (or none = attempt cleared) and removal of the replaced image, atomically. */
@@ -95,53 +111,66 @@
         return run(db, ['corrections', 'images'], 'readwrite', (cs, im) => { if (image) im.put(image); if (deleteImgId) im.delete(deleteImgId); cs.put(correction); });
       },
       discardSession(sid) {
-        return run(db, ['sessions', 'images'], 'readwrite', (ss, im) => {
-          ss.delete('current'); ss.delete('draft');
+        return run(db, ['unfinished', 'drafts', 'images'], 'readwrite', (un, dr, im) => {
+          un.delete(sid); dr.delete(sid);
           im.index('sid').getAllKeys(sid).onsuccess = e => e.target.result.forEach(k => im.delete(k));
         });
       },
-      /* Handwriting draft of the question currently being written: { sid, qi, cid, seq, data|null }.
+      /* Handwriting draft of the question currently being written: { sid, qi, cid, seq, data|null }, ONE per session.
          An older write (lower seq, same session+question) can never replace a newer one. */
       saveDraft(d) {
-        return run(db, ['sessions'], 'readwrite', (ss) => {
-          const g = ss.get('draft');
-          g.onsuccess = () => { const o = g.result; if (!(o && o.sid === d.sid && o.qi === d.qi && o.seq > d.seq)) ss.put(d, 'draft'); };
+        return run(db, ['drafts'], 'readwrite', (dr) => {
+          const g = dr.get(d.sid);
+          g.onsuccess = () => { const o = g.result; if (!(o && o.qi === d.qi && o.seq > d.seq)) dr.put(d); };
         });
       },
-      getDraft() { return run(db, ['sessions'], 'readonly', (ss, out) => { ss.get('draft').onsuccess = e => { out.v = e.target.result || null; }; }); },
+      /* The draft of one session; without an id: the newest draft of any session (single-session callers). */
+      getDraft(sid) {
+        return run(db, ['drafts'], 'readonly', (dr, out) => {
+          if (sid !== undefined) dr.get(sid).onsuccess = e => { out.v = e.target.result || null; };
+          else dr.getAll().onsuccess = e => { out.v = e.target.result.slice().sort((a, b) => b.seq - a.seq)[0] || null; };
+        });
+      },
       getImages(ids) {
         return run(db, ['images'], 'readonly', (im, out) => { const o = out.v = {}; ids.forEach(id => { im.get(id).onsuccess = e => { if (e.target.result) o[id] = e.target.result.data; }; }); });
       },
       getImage(id) {
         return run(db, ['images'], 'readonly', (im, out) => { im.get(id).onsuccess = e => { out.v = e.target.result || null; }; });
       },
-      /* Replace every data store in one transaction (explicit "replace all" import). */
-      replaceAll({ levels, records, images }) {
-        return run(db, ['levels', 'records', 'images', 'sessions', 'corrections'], 'readwrite', (lv, rc, im, ss, cs) => {
-          lv.clear(); rc.clear(); ss.clear();
+      /* Replace every data store in one transaction (explicit "replace all" import).
+         sessions/drafts always come from the backup (an older backup has none: unfinished sessions are then cleared, as the
+         confirmation says). corrections: replaced when the backup has them, otherwise the existing ones (and their images) are kept. */
+      replaceAll({ levels, records, images, sessions, drafts, corrections }) {
+        return run(db, ['levels', 'records', 'images', 'sessions', 'unfinished', 'drafts', 'corrections'], 'readwrite', (lv, rc, im, ss, un, dr, cs) => {
+          lv.clear(); rc.clear(); ss.clear(); un.clear(); dr.clear();
           levels.forEach((x, i) => lv.put({ ...x, ord: i })); records.forEach(x => rc.put(x));
-          // writing-correction activities are not part of the backup format yet: keep them (and their images) instead of silently losing them
-          cs.getAllKeys().onsuccess = e => {
-            const keep = new Set(e.target.result);
-            im.openCursor().onsuccess = ev => { const c = ev.target.result; if (c) { if (!keep.has(c.value.sid)) c.delete(); c.continue(); } else images.forEach(x => im.put(x)); };
-          };
+          (sessions || []).forEach(x => un.put(x)); (drafts || []).forEach(x => dr.put(x));
+          const keepCorr = corrections === undefined;
+          if (!keepCorr) { cs.clear(); corrections.forEach(x => cs.put(x)); }
+          const sweep = keep => { im.openCursor().onsuccess = ev => { const c = ev.target.result; if (c) { if (!keep.has(c.value.sid)) c.delete(); c.continue(); } else images.forEach(x => im.put(x)); }; };
+          if (keepCorr) cs.getAllKeys().onsuccess = e => sweep(new Set(e.target.result)); else sweep(new Set());
         });
       },
       /* Merge: updated levels are written whole; new levels are appended after the existing ones;
-         records/images are only added if absent. */
-      applyMerge({ newLevels, updatedLevels, records, images }) {
-        return run(db, ['levels', 'records', 'images'], 'readwrite', (lv, rc, im) => {
+         records/sessions/drafts/corrections/images are only added if absent. */
+      applyMerge({ newLevels, updatedLevels, records, images, sessions, drafts, corrections }) {
+        return run(db, ['levels', 'records', 'images', 'unfinished', 'drafts', 'corrections'], 'readwrite', (lv, rc, im, un, dr, cs) => {
           updatedLevels.forEach(x => lv.put(x));
           lv.count().onsuccess = e => { newLevels.forEach((x, i) => lv.put({ ...x, ord: e.target.result + i })); };
           records.forEach(x => putIfAbsent(rc, x)); images.forEach(x => putIfAbsent(im, x));
+          (sessions || []).forEach(x => putIfAbsent(un, x)); (corrections || []).forEach(x => putIfAbsent(cs, x));
+          (drafts || []).forEach(x => { const g = dr.getKey(x.sid); g.onsuccess = () => { if (g.result === undefined) dr.put(x); }; });
         });
       },
       exportAll() {
-        return run(db, ['levels', 'records', 'images'], 'readonly', (lv, rc, im, out) => {
+        return run(db, ['levels', 'records', 'images', 'unfinished', 'drafts', 'corrections'], 'readonly', (lv, rc, im, un, dr, cs, out) => {
           const o = out.v = {};
           lv.getAll().onsuccess = e => { o.levels = e.target.result; };
           rc.getAll().onsuccess = e => { o.records = e.target.result; };
           im.getAll().onsuccess = e => { o.images = e.target.result; };
+          un.getAll().onsuccess = e => { o.sessions = sortSessions(e.target.result); };
+          dr.getAll().onsuccess = e => { o.drafts = e.target.result; };
+          cs.getAll().onsuccess = e => { o.corrections = e.target.result; };
         });
       },
       getMeta(key) { return run(db, ['meta'], 'readonly', (m, out) => { m.get(key).onsuccess = e => { out.v = e.target.result; }; }); },
@@ -181,7 +210,7 @@
   /* Compare EVERYTHING that was in the legacy blob with what is now in IndexedDB.
      Returns { parts:Set, problems:[path...] }; empty problems = verified. */
   async function verifyMigration(store, conv) {
-    const all = await store.exportAll(), cur = (await store.loadAll()).session;
+    const all = await store.exportAll(), cur = (await store.loadAll()).sessions.find(x => conv.session && x.id === conv.session.id);
     const lv = new Map(all.levels.map(l => [l.id, l])), rc = new Map(all.records.map(r => [r.id, r])), im = new Map(all.images.map(i => [i.id, i]));
     const problems = [], parts = new Set();
     const check = (part, label, exp, act) => { const o = []; diffs(exp, act, label, o); if (o.length) { parts.add(part); problems.push(...o); } };
@@ -211,11 +240,11 @@
 
     if (!mig || mig.state !== 'verified') {
       try {
-        await run(store.db, ['levels', 'records', 'images', 'sessions'], 'readwrite', (lv, rc, im, ss) => {
+        await run(store.db, ['levels', 'records', 'images', 'unfinished'], 'readwrite', (lv, rc, im, un) => {
           conv.levels.forEach(x => putIfAbsent(lv, x));
           conv.records.forEach(x => putIfAbsent(rc, x));
           conv.images.forEach(x => putIfAbsent(im, x));
-          if (conv.session) { const g = ss.getKey('current'); g.onsuccess = () => { if (g.result === undefined) ss.put(conv.session, 'current'); }; }
+          if (conv.session) putIfAbsent(un, conv.session);
         });
       } catch (e) { throw new StorageError('migration', 'Migration could not write to IndexedDB', e); }
       let v;

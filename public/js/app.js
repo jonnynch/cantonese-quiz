@@ -101,18 +101,29 @@ async function delChar(id) {
 /* ---------- practice / exam picker ---------- */
 function vPick(m) {
   const ex = tab === 'exam', md = ex ? 'exam' : 'practice', lab = ex ? ['讀字考試', '寫字考試'] : ['讀字練習', '聽音寫字']; let h = '';
-  if (Q.cur) { const s = Q.cur; h += `<div class="card"><b>有未完成的${LB(s)}</b>（${esc(s.levelName)}，${s.phase === 'mark' ? '評分中' : '第 ' + (s.i + 1) + ' / ' + s.items.length + ' 題'}）<div class="row"><button class="b p" onclick="resume()">繼續</button><button class="b r" onclick="discard()">放棄</button></div></div>`; }
-  Q.openCorrections().forEach(c => { const n = c.items.reduce((t, x) => t + x.attempts.filter(Boolean).length, 0); h += `<div class="card"><b>有未完成的寫五次練習</b>（${esc(c.levelName)}，${c.items.length} 個字，${n} / ${c.items.length * 5}）<div class="row"><button class="b p" onclick="openCorrection('${c.id}')">繼續</button></div></div>`; });
+  // every unfinished session of this tab (exams here, practice and revision on the practice tab), each independently resumable or discardable
+  Q.unfinished().filter(s => (s.mode === 'exam') === ex).forEach(s => {
+    const prog = s.phase === 'mark' ? '評分中' : '第 ' + (s.i + 1) + ' / ' + s.items.length + ' 題';
+    h += `<div class="card"><b>有未完成的${LB(s)}</b>（${esc(s.levelName)}，${prog}）<div><small>上次作答：${fd(s.updatedAt || s.started || 0)}</small></div><div class="row"><button class="b p" data-id="${esc(s.id)}" onclick="resume(this.dataset.id)">繼續</button><button class="b r" data-id="${esc(s.id)}" onclick="discard(this.dataset.id)">放棄</button></div></div>`;
+  });
+  Q.openCorrections().forEach(c => { const p = CQCore.correctionPosition(c);
+    h += `<div class="card"><b>有未完成的寫五次練習</b>（${esc(c.levelName)}，第 ${p.ci + 1} / ${c.items.length} 個字，第 ${Math.min(p.ai + 1, 5)} 次，${p.saved} / ${p.total}）<div><small>上次作答：${fd(c.updatedAt || c.createdAt)}</small></div><div class="row"><button class="b p" data-id="${esc(c.id)}" onclick="openCorrection(this.dataset.id)">繼續</button></div></div>`; });
   h += Q.levels.map(L => { const n = L.chars.length, low = ex && n < 20, ok = n && !low;
     return `<div class="card"><h3>${esc(L.name)} <small>${n} 字</small></h3>${low ? '<div class="warn">需要至少 20 個字才可以考試。</div>' : ''}<div class="row"><button class="b p" ${ok ? '' : 'disabled'} onclick="start('read','${L.id}','${md}')">${lab[0]}</button><button class="b p" ${ok ? '' : 'disabled'} onclick="start('write','${L.id}','${md}')">${lab[1]}</button></div></div>`; }).join('') || '<p>請先到「級別管理」新增級別和字。</p>';
   m.innerHTML = `<h2>${ex ? '考試' : '練習'}</h2>` + h;
 }
-function resume() { inS = true; res = null; dirty = false; render(); }
-async function discard() { const q = Q, r = await q.discard(confirm); if (q !== Q || r.busy || r.cancelled) return; if (!r.ok) { alert('放棄失敗（' + reason(r.error) + '），未完成的測驗仍然保留。'); return; } render(); }
+/* Continue an unfinished session (id) or, without an id, the current one. Nothing is spoken again and nothing is reset. */
+async function resume(id) {
+  const q = Q;
+  if (id && !(q.cur && q.cur.id === id)) { const r = await q.open(id); if (q !== Q || r.busy) return; if (!r.ok) { alert('無法繼續這次測驗（' + (reason(r.error) || r.error.message) + '）。進度沒有改動。'); return; } }
+  inS = true; res = null; dirty = false; render();
+}
+async function discard(id) { const q = Q, r = await q.discard(confirm, id); if (q !== Q || r.busy || r.cancelled) return; if (!r.ok) { alert('放棄失敗（' + reason(r.error) + '），未完成的測驗仍然保留。'); return; } render(); }
 async function start(kind, levelId, mode) {
   unlockSpeech();
-  const q = Q, r = await q.startSession({ kind, levelId, mode, confirm: m => confirm(m) });
-  if (q !== Q || r.cancelled || r.busy) return;
+  const q = Q, r = await q.startSession({ kind, levelId, mode });
+  if (q !== Q || r.busy) return;
+  if (r.duplicate) { toast('這個練習已有未完成的進度，繼續上次的進度'); return resume(r.existing); }   // never a second copy, never a silent discard
   if (!r.ok) { alert('無法開始測驗（' + (reason(r.error) || r.error.message) + '）。'); return; }
   inS = true; res = null; dirty = false; render(); autoSpeak();
 }
@@ -122,7 +133,7 @@ function sess(m) {
   const s = Q.cur; if (!s) { inS = false; return render(); }
   if (s.phase === 'mark') return marking(m, s);
   const it = s.items[s.i], n = s.items.length;
-  const head = `<div class="bar"><span>${s.i + 1} / ${n}</span><button class="b" onclick="leave()">離開</button></div>`;
+  const head = `<div class="bar"><span>${s.i + 1} / ${n}</span><button class="b" onclick="leave()" aria-label="暫停並離開，進度會保留">⏸ 暫停（保留進度）</button></div>`;
   if (s.kind === 'read') {
     m.innerHTML = head + `<div class="stage"><div class="big han">${esc(it.c)}</div><div class="row"><button class="b r" style="min-width:150px;min-height:72px" onclick="mark(false)">錯誤</button><button class="b p" style="min-width:150px;min-height:72px" onclick="mark(true)">正確</button></div></div>`; return;
   }
@@ -186,7 +197,7 @@ async function done() {
 }
 function marking(m, s) {
   const un = s.items.filter(x => x.ok === null).length;
-  m.innerHTML = `<div class="bar"><h2>家長評分</h2><button class="b" onclick="leave()">離開</button></div><div class="grid">` +
+  m.innerHTML = `<div class="bar"><h2>家長評分</h2><button class="b" onclick="leave()" aria-label="暫停並離開，進度會保留">⏸ 暫停（保留進度）</button></div><div class="grid">` +
     s.items.map((it, k) => `<div class="card mk"><div class="han mid">${esc(it.c)}</div><div>${esc(it.w)} <small>${esc(it.wjp)}</small></div>${it.imgId ? `<img data-img="${esc(it.imgId)}" alt="">` : '<div class="warn">沒有手寫圖片</div>'}<div class="row"><button class="b r ${it.ok === false ? 'on' : ''}" onclick="setOk(${k},false)">錯誤</button><button class="b p ${it.ok === true ? 'on' : ''}" onclick="setOk(${k},true)">正確</button></div></div>`).join('') +
     `</div><div class="row"><button class="b p" ${un ? 'disabled' : ''} onclick="finish()">完成評分</button>${un ? `<span class="warn">還有 ${un} 題未評分</span>` : ''}</div>`;
 }
@@ -207,8 +218,10 @@ function result(m) {
 }
 async function revise() {
   unlockSpeech();
-  const q = Q, r = res, rr = await q.startSession({ kind: r.kind, levelId: r.levelId, mode: 'revision', parentId: r.id, chars: r.items.filter(x => !x.ok).map(x => ({ id: x.cid, c: x.c, jp: x.jp, w: x.w, wjp: x.wjp })), confirm: m => confirm(m) });
-  if (q !== Q || rr.cancelled || rr.busy) return; if (!rr.ok) { alert('無法開始溫習（' + reason(rr.error) + '）。'); return; }
+  const q = Q, r = res, rr = await q.startSession({ kind: r.kind, levelId: r.levelId, mode: 'revision', parentId: r.id, chars: r.items.filter(x => !x.ok).map(x => ({ id: x.cid, c: x.c, jp: x.jp, w: x.w, wjp: x.wjp })) });
+  if (q !== Q || rr.busy) return;
+  if (rr.duplicate) { toast('這次溫習已有未完成的進度，繼續上次的進度'); return resume(rr.existing); }
+  if (!rr.ok) { alert('無法開始溫習（' + reason(rr.error) + '）。'); return; }
   res = null; inS = true; dirty = false; render(); autoSpeak();
 }
 /* ---------- history ---------- */
@@ -227,7 +240,7 @@ function vHist(m) {
 }
 /* ---------- settings: backup ---------- */
 function vSet(m) {
-  m.innerHTML = `<h2>設定</h2><div class="card"><h3>學習者：${AV(profile.avatar)} ${esc(profile.name)}</h3><div class="row"><button class="b p" onclick="switchLearner()">切換學習者</button><button class="b" onclick="manageLearners()">管理學習者</button></div></div><div class="card"><h3>安裝到主畫面</h3><p><small>iPad／iPhone：在 Safari 按「分享」，再選「加入主畫面」。Android／Chrome：選單 →「安裝應用程式」。安裝後，打開過一次的應用程式可以在沒有網絡時使用，所有資料都儲存在這部裝置上。</small></p></div><div class="card"><h3>匯出備份</h3><p><small>只包括「${esc(profile.name)}」的級別、字、紀錄和手寫圖片。未完成的測驗不包括在內。</small></p><button class="b p" onclick="exp()">匯出</button><div id="emsg" class="row"></div></div>
+  m.innerHTML = `<h2>設定</h2><div class="card"><h3>學習者：${AV(profile.avatar)} ${esc(profile.name)}</h3><div class="row"><button class="b p" onclick="switchLearner()">切換學習者</button><button class="b" onclick="manageLearners()">管理學習者</button></div></div><div class="card"><h3>安裝到主畫面</h3><p><small>iPad／iPhone：在 Safari 按「分享」，再選「加入主畫面」。Android／Chrome：選單 →「安裝應用程式」。安裝後，打開過一次的應用程式可以在沒有網絡時使用，所有資料都儲存在這部裝置上。</small></p></div><div class="card"><h3>匯出備份</h3><p><small>包括「${esc(profile.name)}」的級別、字、紀錄、手寫圖片，以及未完成的測驗、未交的手寫草稿和寫五次練習。</small></p><button class="b p" onclick="exp()">匯出</button><div id="emsg" class="row"></div></div>
   <div class="card"><h3>匯入備份</h3><p><small>只會影響「${esc(profile.name)}」的資料。</small></p><div class="row"><label><input type="radio" name="im" value="merge" checked style="width:auto;min-height:0"> 合併（保留現有資料）</label><label><input type="radio" name="im" value="replace" style="width:auto;min-height:0"> 取代全部資料</label></div><input type="file" id="fi" accept=".json,application/json"><div id="imsg"></div></div>`;
   $('#fi').onchange = e => { if (e.target.files[0]) imp(e.target.files[0]); e.target.value = ''; };
 }
@@ -250,7 +263,7 @@ async function imp(f) {
   }
   if (q !== Q || r.cancelled) return;
   if (r.aborted) { msg.innerHTML = `<p class="warn">沒有匯入任何資料：發現 ${r.conflicts.length} 項衝突，現有資料沒有改動。</p><ul class="warn">${list(r.conflicts, 10)}</ul><p><small>如要使用備份的內容，請先匯出目前的資料，再選擇「取代全部資料」。</small></p>`; return; }
-  msg.innerHTML = `<p class="g">${r.mode === 'replace' ? '已取代全部資料' : '已合併'}：新增級別 ${r.added.levels}、新增字 ${r.added.chars}、新增紀錄 ${r.added.records}${r.identical ? `；${r.identical} 項資料已存在（相同），已略過` : ''}。</p>` +
+  msg.innerHTML = `<p class="g">${r.mode === 'replace' ? '已取代全部資料' : '已合併'}：新增級別 ${r.added.levels}、新增字 ${r.added.chars}、新增紀錄 ${r.added.records}${r.added.sessions ? `、未完成的測驗 ${r.added.sessions}` : ''}${r.added.corrections ? `、寫五次練習 ${r.added.corrections}` : ''}${r.identical ? `；${r.identical} 項資料已存在（相同），已略過` : ''}。</p>` +
     (r.conflicts.length ? `<p class="warn">發現 ${r.conflicts.length} 項衝突，沒有覆蓋現有資料：</p><ul class="warn">${list(r.conflicts, 10)}</ul>` : '') +
     (r.warnings.length ? `<ul class="warn">${list(r.warnings, 10)}</ul>` : '');
 }
@@ -276,7 +289,7 @@ function vCorrection(m) {
     return;
   }
   const it = c.items[corrIdx], last = corrIdx + 1 >= c.items.length;
-  m.innerHTML = `<div class="bar"><span id="cprog"></span><button class="b" onclick="leaveCorr()">離開</button></div><div class="stage"><p><b>呢個字未寫正確，請連續寫五次。</b></p>` +
+  m.innerHTML = `<div class="bar"><span id="cprog"></span><button class="b" onclick="leaveCorr()" aria-label="暫停並離開，進度會保留">⏸ 暫停（保留進度）</button></div><div class="stage"><p><b>呢個字未寫正確，請連續寫五次。</b></p>` +
     `<div class="big han" style="font-size:min(30vw,20vh,180px)">${esc(it.c)}</div>` +
     (it.w ? `<div class="han mid">${esc(it.w)}${it.wjp ? ` <small>${esc(it.wjp)}</small>` : ''}</div>` : '') +
     `<div class="row"><button class="b spk" onclick="sayC('c')" aria-label="單字發音">🔊 單字</button>${it.w ? '<button class="b spk" onclick="sayC(\'w\')" aria-label="詞語發音">🔊 詞語</button>' : ''}</div>` +
@@ -392,7 +405,7 @@ async function selectProfile(id) {
   store = st; profile = p; Q = q; resetLearnerState();
   q.onDraftError = e => { if (q === Q) showDraftError(e); }; q.onDraftOk = () => { if (q === Q) hideErr(); };
   try { sessionStorage.setItem(ACTIVE_KEY, id); } catch (e) { }
-  if (q.cur) { tab = q.cur.mode === 'exam' ? 'exam' : 'practice'; toast('有未完成的測驗，可以繼續或放棄'); }
+  const un = q.unfinished(); if (un.length) { tab = un[0].mode === 'exam' ? 'exam' : 'practice'; toast(un.length > 1 ? '有 ' + un.length + ' 個未完成的測驗，可以繼續或放棄' : '有未完成的測驗，可以繼續或放棄'); }
   render();
 }
 let pmsg = '';

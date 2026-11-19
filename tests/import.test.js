@@ -60,12 +60,12 @@ test('merge detects conflicts and, by default, applies nothing', async () => {
   const r = await q.importBackup(inc, 'merge');
   assert.equal(r.aborted, true); assert.equal(r.conflicts.length, 4, r.conflicts.join('\n'));
   assert.ok(r.conflicts.some(x => x.includes('級別 (L1)')) && r.conflicts.some(x => x.includes('字 (c1)')) && r.conflicts.some(x => x.includes('另一個級別')) && r.conflicts.some(x => x.includes('紀錄 (')));
-  assert.equal(r.identical, 1); assert.deepEqual(r.added, { levels: 0, chars: 0, records: 0 });
+  assert.equal(r.identical, 1); assert.deepEqual(r.added, { levels: 0, chars: 0, records: 0, sessions: 0, corrections: 0 });
   assert.equal(await snapshot(st), before);                                                   // nothing changed, nothing half-merged
   assert.equal(JSON.stringify(q.records.find(x => x.id === origId)), origRec); assert.equal(q.levels.length, 1);
   // explicit opt-in: apply only the non-conflicting parts; conflicting items are still never overwritten
   const p = await q.importBackup(inc, 'merge', undefined, { allowPartial: true });
-  assert.equal(p.aborted, undefined); assert.deepEqual(p.added, { levels: 1, chars: 2, records: 1 });
+  assert.equal(p.aborted, undefined); assert.deepEqual(p.added, { levels: 1, chars: 2, records: 1, sessions: 0, corrections: 0 });
   const L1 = q.levels.find(l => l.id === 'L1'); assert.equal(L1.name, '一級'); assert.equal(L1.chars.find(c => c.id === 'c1').c, '字');
   assert.ok(L1.chars.some(c => c.id === 'cNew')); assert.deepEqual(q.levels.find(l => l.id === 'L2').chars.map(c => c.id), ['d1']);
   assert.equal(JSON.stringify(q.records.find(x => x.id === origId)), origRec);
@@ -87,8 +87,8 @@ test('merge: identical duplicates (levels, characters, records with handwriting)
   const { st, q, json } = await withWriting(); const before = await snapshot(st);
   const r = await q.importBackup(json(), 'merge');
   assert.equal(r.aborted, undefined); assert.equal(r.conflicts.length, 0);
-  assert.equal(r.identical, 3);                                                              // 2 characters + 1 record
-  assert.deepEqual(r.added, { levels: 0, chars: 0, records: 0 }); assert.equal(await snapshot(st), before);
+  assert.equal(r.identical, 4);                                                              // 2 characters + 1 record + its writing-correction activity
+  assert.deepEqual(r.added, { levels: 0, chars: 0, records: 0, sessions: 0, corrections: 0 }); assert.equal(await snapshot(st), before);
 });
 
 test('merge: every character field difference with the same ID is a conflict', async () => {

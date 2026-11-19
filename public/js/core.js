@@ -17,6 +17,7 @@
   const IMG_RE = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/;
   const MAX_IMG = 3000000;
   const KINDS = ['read', 'write'], MODES = ['practice', 'revision', 'exam'];
+  const ATTEMPTS = 5, CORRECTION_MODES = ['practice', 'revision', 'exam'];
   const isStr = v => typeof v === 'string';
   const optStr = v => v == null || typeof v === 'string';
   const str = v => (typeof v === 'string' ? v : '');
@@ -29,7 +30,7 @@
     const d = j.data;
     if (!isObj(d) || !Array.isArray(d.levels) || !Array.isArray(d.records)) throw new ImportError(['備份缺少級別或紀錄']);
     const errs = []; const add = m => { if (errs.length < 10) errs.push(m); else errs.more = true; };
-    const lvIds = new Set(), chIds = new Set(), rcIds = new Set();
+    const lvIds = new Set(), chIds = new Set(), rcIds = new Set(), sIds = new Set(), cIds = new Set();
     const levels = [], records = [];
     d.levels.forEach((l, i) => {
       const at = '第 ' + (i + 1) + ' 個級別';
@@ -74,8 +75,73 @@
       if (ok) records.push({ id: r.id, levelId: r.levelId, levelName: str(r.levelName), kind: r.kind, mode: r.mode,
         parentId: r.parentId || null, ...(Number.isFinite(r.started) ? { started: r.started } : {}), date: r.date, items });
     });
+    /* Optional (added after the first backups were made; an older backup simply has none of them): unfinished sessions,
+       their handwriting drafts and writing-correction activities. Same version number: no separate format. */
+    const sessions = [], drafts = [], corrections = [];
+    const provided = { sessions: d.sessions !== undefined, drafts: d.drafts !== undefined, corrections: d.corrections !== undefined };
+    const okImg = v => v == null || v === '' || (isStr(v) && v.length <= MAX_IMG && IMG_RE.test(v));
+    if (provided.sessions && !Array.isArray(d.sessions)) add('未完成測驗的列表格式不正確');
+    else (d.sessions || []).forEach((x, i) => {
+      const at = '第 ' + (i + 1) + ' 個未完成的測驗';
+      if (!isObj(x) || !isStr(x.id) || !x.id) return add(at + '沒有有效的編號');
+      if (sIds.has(x.id) || rcIds.has(x.id)) return add('未完成的測驗編號重複：' + x.id);
+      sIds.add(x.id);
+      if (!isStr(x.levelId) || !x.levelId) return add(at + '沒有級別編號');
+      if (!KINDS.includes(x.kind) || !MODES.includes(x.mode)) return add(at + '的類型不正確');
+      if (!optStr(x.levelName) || !optStr(x.parentId)) return add(at + '的欄位格式不正確');
+      if (x.started != null && !Number.isFinite(x.started)) return add(at + '的開始時間不正確');
+      if (x.updatedAt != null && !Number.isFinite(x.updatedAt)) return add(at + '的更新時間不正確');
+      if (!['ask', 'mark'].includes(x.phase) || (x.kind === 'read' && x.phase !== 'ask')) return add(at + '的進度狀態不正確');
+      if (!Array.isArray(x.items) || !x.items.length) return add(at + '的題目列表格式不正確');
+      if (!Number.isInteger(x.i) || x.i < 0 || x.i >= x.items.length) return add(at + '的目前題號不正確');
+      const items = []; let ok = true;
+      x.items.forEach((it, k) => {
+        const lab = at + '第 ' + (k + 1) + ' 題';
+        if (!isObj(it) || !isStr(it.cid) || !it.cid || !isStr(it.c) || !it.c) { ok = false; return add(lab + '資料有誤'); }
+        if (it.ok !== null && typeof it.ok !== 'boolean') { ok = false; return add(lab + '的評分結果不正確'); }
+        if (![it.jp, it.w, it.wjp].every(optStr)) { ok = false; return add(lab + '的欄位格式不正確'); }
+        if (!okImg(it.img)) { ok = false; return add(lab + '的手寫圖片資料有誤'); }
+        if (x.kind === 'read' && (it.ok !== null) !== (k < x.i)) { ok = false; return add(lab + '的作答與進度不一致'); }
+        items.push({ cid: it.cid, c: it.c, jp: str(it.jp), w: str(it.w), wjp: str(it.wjp), ok: it.ok, img: it.img || null });
+      });
+      if (ok) sessions.push({ id: x.id, levelId: x.levelId, levelName: str(x.levelName), kind: x.kind, mode: x.mode, parentId: x.parentId || null,
+        ...(Number.isFinite(x.started) ? { started: x.started } : {}), ...(Number.isFinite(x.updatedAt) ? { updatedAt: x.updatedAt } : {}), i: x.i, phase: x.phase, items });
+    });
+    if (provided.drafts && !Array.isArray(d.drafts)) add('手寫草稿的列表格式不正確');
+    else (d.drafts || []).forEach((x, i) => {
+      const at = '第 ' + (i + 1) + ' 個手寫草稿', s0 = isObj(x) && sessions.find(y => y.id === x.sid);
+      if (!isObj(x) || !isStr(x.sid)) return add(at + '沒有所屬的測驗編號');
+      if (!s0) { if (sIds.has(x.sid)) return; return add(at + '找不到所屬的未完成測驗'); }   // its session was already reported as invalid
+      if (s0.kind !== 'write' || s0.phase !== 'ask' || x.qi !== s0.i || x.cid !== s0.items[s0.i].cid) return add(at + '與測驗目前的題目不符');
+      if (!Number.isFinite(x.seq)) return add(at + '的序號不正確');
+      if (x.data != null && (!isStr(x.data) || !okImg(x.data))) return add(at + '的圖片資料有誤');
+      if (drafts.some(y => y.sid === x.sid)) return add(at + '重複');
+      drafts.push({ sid: x.sid, qi: x.qi, cid: x.cid, seq: x.seq, data: x.data || null });
+    });
+    if (provided.corrections && !Array.isArray(d.corrections)) add('寫五次練習的列表格式不正確');
+    else (d.corrections || []).forEach((x, i) => {
+      const at = '第 ' + (i + 1) + ' 個寫五次練習';
+      if (!isObj(x) || !isStr(x.id) || !x.id) return add(at + '沒有有效的編號');
+      if (cIds.has(x.id)) return add('寫五次練習編號重複：' + x.id);
+      cIds.add(x.id);
+      if (!isStr(x.sourceId) || !x.sourceId || !isStr(x.levelId) || !x.levelId || x.sourceKind !== 'write' || !CORRECTION_MODES.includes(x.sourceMode)) return add(at + '的來源資料不正確');
+      if (!optStr(x.levelName) || !Number.isFinite(x.createdAt) || !['open', 'done'].includes(x.state)) return add(at + '的欄位格式不正確');
+      if (x.updatedAt != null && !Number.isFinite(x.updatedAt)) return add(at + '的更新時間不正確');
+      if (x.state === 'done' ? !Number.isFinite(x.completedAt) : x.completedAt != null) return add(at + '的完成時間不正確');
+      if (!Array.isArray(x.items) || !x.items.length) return add(at + '的字列表格式不正確');
+      const items = []; let ok = true;
+      x.items.forEach((it, k) => {
+        const lab = at + '第 ' + (k + 1) + ' 個字';
+        if (!isObj(it) || !isStr(it.cid) || !it.cid || !isStr(it.c) || !it.c || ![it.jp, it.w, it.wjp].every(optStr)) { ok = false; return add(lab + '資料有誤'); }
+        if (!Array.isArray(it.attempts) || it.attempts.length !== ATTEMPTS || !it.attempts.every(a => a == null || (a !== '' && okImg(a)))) { ok = false; return add(lab + '的手寫次數資料有誤'); }
+        if (x.state === 'done' && !it.attempts.every(Boolean)) { ok = false; return add(lab + '標示為已完成，但沒有五次手寫圖片'); }
+        items.push({ cid: it.cid, c: it.c, jp: str(it.jp), w: str(it.w), wjp: str(it.wjp), attempts: it.attempts.map(a => a || null) });
+      });
+      if (ok) corrections.push({ id: x.id, sourceId: x.sourceId, sourceKind: 'write', sourceMode: x.sourceMode, levelId: x.levelId, levelName: str(x.levelName), createdAt: x.createdAt,
+        ...(Number.isFinite(x.updatedAt) ? { updatedAt: x.updatedAt } : {}), completedAt: x.state === 'done' ? x.completedAt : null, state: x.state, items });
+    });
     if (errs.length) { if (errs.more) errs.push('還有更多錯誤未列出'); throw new ImportError(errs); }
-    return { levels, records };
+    return { levels, records, sessions, drafts, corrections, provided };
   }
 
   /* Move inline `img` data out of record items into separate image rows (stored in IndexedDB). */
@@ -87,6 +153,25 @@
       return rest;
     }) }));
     return { records: out, images };
+  }
+
+  /* Same idea for unfinished sessions (item images) and writing-correction activities (attempt images). Drafts keep their data inline. */
+  function splitSessionImages(sessions) {
+    const images = [];
+    const out = sessions.map(x => ({ ...x, items: x.items.map((it, k) => {
+      const { img, ...rest } = it;
+      if (img) { const id = 'imp-' + x.id + '-' + k; images.push({ id, sid: x.id, data: img }); return { ...rest, imgId: id }; }
+      return { ...rest, imgId: null };
+    }) }));
+    return { sessions: out, images };
+  }
+  function splitCorrectionImages(corrections) {
+    const images = [];
+    const out = corrections.map(c => ({ ...c, items: c.items.map((it, ci) => ({ ...it, attempts: it.attempts.map((a, ai) => {
+      if (!a) return null;
+      const id = 'imp-' + c.id + '-' + ci + '-' + ai; images.push({ id, sid: c.id, data: a }); return id;
+    }) })) }));
+    return { corrections: out, images };
   }
 
   /* ---- deep comparison used for merge conflict detection ---- */
@@ -123,10 +208,43 @@
     return o;
   }
 
+  function normSession(x, imgs) {
+    return { levelId: x.levelId, levelName: str(x.levelName), kind: x.kind, mode: x.mode, parentId: x.parentId || null, started: Number.isFinite(x.started) ? x.started : null, i: x.i, phase: x.phase,
+      items: x.items.map(it => ({ cid: it.cid, c: it.c, jp: str(it.jp), w: str(it.w), wjp: str(it.wjp), ok: it.ok === undefined ? null : it.ok,
+        img: it.img || (it.imgId ? (imgs && imgs[it.imgId]) || ('<missing:' + it.imgId + '>') : null) })) };
+  }
+  function sessionDiffs(a, b) {
+    const o = [];
+    [['levelId', '級別'], ['kind', '類型'], ['mode', '模式'], ['parentId', '溫習來源'], ['started', '開始時間'], ['i', '目前題號'], ['phase', '進度狀態']].forEach(([k, n]) => { if (a[k] !== b[k]) o.push(n + '不同'); });
+    if (a.items.length !== b.items.length) o.push('題目數量不同');
+    for (let k = 0; k < Math.min(a.items.length, b.items.length); k++) {
+      const x = a.items[k], y = b.items[k], n = '第 ' + (k + 1) + ' 題';
+      if (x.cid !== y.cid || x.c !== y.c) o.push(n + '的字不同'); if (x.ok !== y.ok) o.push(n + '的作答不同'); if (x.img !== y.img) o.push(n + '的手寫圖片不同');
+    }
+    return o;
+  }
+  function normCorrection(x, imgs) {
+    const im = id => (id ? (imgs && imgs[id]) || (/^data:/.test(id) ? id : '<missing:' + id + '>') : null);
+    return { sourceId: x.sourceId, levelId: x.levelId, state: x.state, completedAt: x.completedAt || null,
+      items: x.items.map(it => ({ cid: it.cid, c: it.c, attempts: it.attempts.map(im) })) };
+  }
+  function correctionDiffs(a, b) {
+    const o = [];
+    [['sourceId', '來源測驗'], ['levelId', '級別'], ['state', '完成狀態'], ['completedAt', '完成時間']].forEach(([k, n]) => { if (a[k] !== b[k]) o.push(n + '不同'); });
+    if (a.items.length !== b.items.length) o.push('字數不同');
+    for (let k = 0; k < Math.min(a.items.length, b.items.length); k++) {
+      const x = a.items[k], y = b.items[k];
+      if (x.cid !== y.cid) o.push('第 ' + (k + 1) + ' 個字不同'); else if (x.attempts.some((t, j) => t !== y.attempts[j])) o.push('第 ' + (k + 1) + ' 個字的手寫次數不同');
+    }
+    return o;
+  }
+
   /* Pure merge planner. Never overwrites existing data; every difference becomes a reported conflict.
      existingImages: { imgId: dataURL } for the existing records that share an ID with an incoming one. */
   function planMerge(existing, incoming, now, existingImages) {
-    const P = { newLevels: [], updatedLevels: [], newRecords: [], images: [], conflicts: [], warnings: [], identical: 0, added: { levels: 0, chars: 0, records: 0 } };
+    const P = { newLevels: [], updatedLevels: [], newRecords: [], newSessions: [], newDrafts: [], newCorrections: [], images: [], conflicts: [], warnings: [], identical: 0, added: { levels: 0, chars: 0, records: 0, sessions: 0, corrections: 0 } };
+    existing = { ...existing, sessions: existing.sessions || [], corrections: existing.corrections || [] };
+    incoming = { ...incoming, sessions: incoming.sessions || [], drafts: incoming.drafts || [], corrections: incoming.corrections || [] };
     const lvMap = new Map(existing.levels.map(l => [l.id, l]));
     const owner = new Map(); existing.levels.forEach(l => l.chars.forEach(c => owner.set(c.id, { lid: l.id, c })));
     const elsewhere = (c, L) => '字 (' + c.id + ')「' + c.c + '」已經在另一個級別，沒有加入「' + L.name + '」';
@@ -151,16 +269,42 @@
     const rcMap = new Map(existing.records.map(r => [r.id, r]));
     const levelIds = new Set([...existing.levels.map(l => l.id), ...incoming.levels.map(l => l.id)]);
     const recIds = new Set([...existing.records.map(r => r.id), ...incoming.records.map(r => r.id)]);
-    const fresh = [];
+    const fresh = [], sMap = new Map(existing.sessions.map(x => [x.id, x]));
     incoming.records.forEach(r => {
       const x = rcMap.get(r.id);
+      if (!x && sMap.has(r.id)) { P.conflicts.push('測驗 (' + r.id + ')在備份中已經完成，但這裡仍然是未完成的版本，已保留現有的未完成測驗，沒有加入備份的紀錄'); return; }
       if (!x) { fresh.push(r); return; }
       const d = recordDiffs(normRecord(x, existingImages), normRecord(r, null));
       if (!d.length) P.identical++;
       else P.conflicts.push('紀錄 (' + r.id + ')（' + recLabel(x) + '）與備份不同：' + d.slice(0, 4).join('、') + (d.length > 4 ? '…' : '') + '。已保留現有紀錄');
     });
     const sp = splitImages(fresh);
-    P.newRecords = sp.records; P.images = sp.images; P.added.records = sp.records.length;
+    P.newRecords = sp.records; P.images = sp.images.slice(); P.added.records = sp.records.length;
+    /* unfinished sessions: added only if absent; a session that is already a completed record here never comes back as unfinished */
+    const keyOf = x => [x.kind, x.levelId, x.mode, x.parentId || ''].join('|'), taken = new Set(existing.sessions.map(keyOf)); let same = 0, done = 0; const freshS = [];
+    incoming.sessions.forEach(x => {
+      const e = sMap.get(x.id);
+      if (rcMap.has(x.id)) { done++; return; }
+      if (!e) { freshS.push(x); if (taken.has(keyOf(x))) same++; return; }
+      const d = sessionDiffs(normSession(e, existingImages), normSession(x, null));
+      if (!d.length) { P.identical++; freshS.push(null); } else P.conflicts.push('未完成的測驗 (' + x.id + ')（' + (KIND_NAME[e.kind] || e.kind) + (MODE_NAME[e.mode] || e.mode) + '，' + str(e.levelName) + '）與備份不同：' + d.slice(0, 4).join('、') + (d.length > 4 ? '…' : '') + '。已保留現有版本');
+      // a handwriting draft is added only if this device has none for that session (putIfAbsent in the store)
+    });
+    const sp2 = splitSessionImages(freshS.filter(Boolean)), addIds = new Set(sp2.sessions.map(x => x.id));
+    P.newSessions = sp2.sessions; P.images.push(...sp2.images); P.added.sessions = sp2.sessions.length;
+    const sameIdsIdentical = new Set(incoming.sessions.filter(x => sMap.has(x.id) && !rcMap.has(x.id)).map(x => x.id));
+    P.newDrafts = incoming.drafts.filter(x => addIds.has(x.sid) || sameIdsIdentical.has(x.sid));
+    if (done) P.warnings.push(done + ' 個備份中的未完成測驗在這裡已經完成，沒有加入未完成的列表');
+    if (same) P.warnings.push(same + ' 個未完成的測驗與現有未完成的測驗屬於同一級別和類型，兩者都已保留');
+    const cMap = new Map(existing.corrections.map(x => [x.id, x]));
+    const cs2 = [];
+    incoming.corrections.forEach(x => {
+      const e = cMap.get(x.id);
+      if (!e) { cs2.push(x); return; }
+      const d = correctionDiffs(normCorrection(e, existingImages), normCorrection(x, null));
+      if (!d.length) P.identical++; else P.conflicts.push('寫五次練習 (' + x.id + ')（' + str(e.levelName) + '）與備份不同：' + d.slice(0, 4).join('、') + (d.length > 4 ? '…' : '') + '。已保留現有版本');
+    });
+    const sc = splitCorrectionImages(cs2); P.newCorrections = sc.corrections; P.images.push(...sc.images); P.added.corrections = sc.corrections.length;
     const noLevel = fresh.filter(r => !levelIds.has(r.levelId)).length, noParent = fresh.filter(r => r.parentId && !recIds.has(r.parentId)).length;
     if (noLevel) P.warnings.push(noLevel + ' 個紀錄所屬的級別不在資料中（紀錄仍會保留，以當時的級別名稱顯示）');
     if (noParent) P.warnings.push(noParent + ' 個溫習紀錄找不到原本的測驗紀錄（仍會保留）');
@@ -177,21 +321,28 @@
   const durationOf = r => formatDuration(r && r.started, r && r.date);
 
   /* ---- writing correction: write each wrongly written character five times ---- */
-  const ATTEMPTS = 5, CORRECTION_MODES = ['practice', 'revision', 'exam'];
   const attemptsDone = it => it.attempts.length === ATTEMPTS && it.attempts.every(Boolean) && new Set(it.attempts).size === ATTEMPTS;   // five distinct saved images
+  /* The exact point to resume a correction activity at: first character that still lacks five saved attempts, and the next
+     empty attempt slot of that character (0-based `ai`; ai + 1 is the attempt number shown to the learner). */
+  function correctionPosition(c) {
+    const total = c.items.reduce((t, x) => t + x.attempts.filter(Boolean).length, 0), ci = c.items.findIndex(x => !attemptsDone(x));
+    if (ci < 0) return { ci: Math.max(0, c.items.length - 1), ai: ATTEMPTS, saved: total, total: c.items.length * ATTEMPTS };
+    const ai = c.items[ci].attempts.findIndex(a => !a);
+    return { ci, ai: ai < 0 ? ATTEMPTS : ai, saved: total, total: c.items.length * ATTEMPTS };
+  }
   function buildCorrection(rec, now) {
     if (rec.kind !== 'write' || !CORRECTION_MODES.includes(rec.mode)) return null;
     const bad = rec.items.filter(x => x.ok === false);                     // final parent markings
     if (!bad.length) return null;
     return { id: 'corr-' + rec.id, sourceId: rec.id, sourceKind: rec.kind, sourceMode: rec.mode, levelId: rec.levelId, levelName: rec.levelName || '',
-      createdAt: now, completedAt: null, state: 'open',
+      createdAt: now, updatedAt: now, completedAt: null, state: 'open',
       items: bad.map(x => ({ cid: x.cid, c: x.c, jp: x.jp || '', w: x.w || '', wjp: x.wjp || '', attempts: Array(ATTEMPTS).fill(null) })) };
   }
 
   function buildRecord(s, now) {
     return { id: s.id, levelId: s.levelId, levelName: s.levelName || '', kind: s.kind, mode: s.mode, parentId: s.parentId || null,
       ...(Number.isFinite(s.started) ? { started: s.started } : {}), date: now,   // started = real session start, date = completion time
-      items: s.items.map(({ cid, c, jp, w, wjp, ok, imgId }) => ({ cid, c, jp, w, wjp, ok, imgId: imgId || null })) };
+      items: s.items.map(({ cid, c, jp, w, wjp, ok, imgId }) => ({ cid, c, jp, w, wjp, ok, imgId: imgId || null })) };   // started is the ORIGINAL start: pausing/resuming never resets it
   }
 
   /* ---------------- Quiz controller ----------------
@@ -200,16 +351,23 @@
     constructor(store, o) {
       o = o || {};
       this.store = store; this.uid = o.uid || defaultUid; this.now = o.now || Date.now; this.shuffle = o.shuffle || shuf;
-      this.levels = []; this.records = []; this.cur = null; this.busy = false; this.retry = null; this.result = null;
+      this.levels = []; this.records = []; this.sessions = []; this.cur = null; this.busy = false; this.retry = null; this.result = null;
       this.draftDelay = o.draftDelay == null ? 400 : o.draftDelay;
       this.onDraftError = null; this.onDraftOk = null; this.draftError = null;
       this._pend = null; this._timer = null; this._flushing = null; this._flushRunning = false; this.closed = false; this._lastAct = Promise.resolve(); this._cq = Promise.resolve(); this.corrections = []; this._seq = Date.now() * 1000;
     }
     async init() { this._set(await this.store.loadAll()); }
     _set(d) {
-      this.levels = sortLevels(d.levels); this.records = d.records.slice().sort((a, b) => (a.date || 0) - (b.date || 0)); this.cur = d.session || null; this.corrections = (d.corrections || []).slice().sort((a, b) => a.createdAt - b.createdAt);
+      this.levels = sortLevels(d.levels); this.records = d.records.slice().sort((a, b) => (a.date || 0) - (b.date || 0));
+      this.sessions = (d.sessions || (d.session ? [d.session] : [])).slice();   // every unfinished session, newest first
+      this.cur = (this.cur && this.sessions.find(x => x.id === this.cur.id)) || this.sessions[0] || null;   // cur = the session being worked on / most recent
+      this.corrections = (d.corrections || []).slice().sort((a, b) => a.createdAt - b.createdAt);
     }
     level(id) { return this.levels.find(l => l.id === id); }
+    /* all unfinished sessions, most recently active first */
+    unfinished() { return this.sessions.slice().sort((a, b) => ((b.updatedAt || b.started || 0) - (a.updatedAt || a.started || 0)) || (a.id < b.id ? -1 : 1)); }
+    /* every mutation of a session: persisted first by the caller, then applied here (stamping the last-updated time is done by the caller on its copy) */
+    _putSession(n) { const i = this.sessions.findIndex(x => x.id === n.id); if (i < 0) this.sessions.push(n); else this.sessions[i] = n; this.cur = n; }
 
     _act(fn) {
       if (this.closed) return Promise.resolve({ ok: false, error: new Error('This learner session is closed') });
@@ -274,7 +432,7 @@
     /* The saved draft for the current question only (null if none / for another question or session). */
     async loadDraft() {
       const s = this.cur; if (!s || s.kind !== 'write' || s.phase !== 'ask') return null;
-      const d = await this.store.getDraft();
+      const d = await this.store.getDraft(s.id);
       return d && d.sid === s.id && d.qi === s.i && d.cid === s.items[s.i].cid ? d : null;
     }
 
@@ -284,22 +442,39 @@
     }
 
     /* sessions */
+    /* Starting an exercise never touches other unfinished sessions. Only an unfinished session of the SAME level, kind, mode (and
+       revision source) counts as a duplicate: it is neither replaced nor duplicated unless the caller passes a `confirm` that agrees
+       to replace it; otherwise { ok:false, duplicate:true, existing:<id> } tells the UI to resume it instead. */
     startSession({ kind, levelId, mode, chars, parentId, confirm }) {
       const L = this.level(levelId);
       let cs = chars || (L ? L.chars : []);
       if (!chars && mode === 'exam') { if (cs.length < 20) return Promise.resolve({ ok: false, error: new Error('Need at least 20 characters') }); cs = this.shuffle(cs).slice(0, 20); }
       if (!cs.length) return Promise.resolve({ ok: false, error: new Error('No characters') });
-      if (this.cur && !(confirm && confirm('有未完成的測驗，要放棄並開始新的嗎？'))) return Promise.resolve({ ok: false, cancelled: true });
-      const s = { id: this.uid(), levelId, levelName: L ? L.name : '', kind, mode, parentId: parentId || null, started: this.now(), i: 0, phase: 'ask',
+      const dup = this.sessions.find(x => x.kind === kind && x.levelId === levelId && x.mode === mode && (x.parentId || null) === (parentId || null));
+      if (dup && !(confirm && confirm('這個練習已經有未完成的進度，要放棄舊的並重新開始嗎？'))) return Promise.resolve({ ok: false, duplicate: true, existing: dup.id });
+      const t = this.now();
+      const s = { id: this.uid(), levelId, levelName: L ? L.name : '', kind, mode, parentId: parentId || null, started: t, updatedAt: t, i: 0, phase: 'ask',
         items: this.shuffle(cs).map(c => ({ cid: c.id, c: c.c, jp: c.jp || '', w: c.w || '', wjp: c.wjp || '', ok: null, imgId: null })) };
-      return this._act(async () => { await this.store.startSession(s, this.cur ? this.cur.id : null); this._dropDraft(); this.cur = s; this.result = null; });
+      return this._act(async () => {
+        await this.flushDraft();                                          // the drawing of the session being left is saved first
+        await this.store.startSession(s, dup ? dup.id : null);
+        this._dropDraft(); this.sessions = this.sessions.filter(x => !dup || x.id !== dup.id); this._putSession(s); this.result = null;
+      });
+    }
+    /* Make an existing unfinished session the current one (its drawing draft is restored by loadDraft). */
+    open(id) {
+      return this._act(async () => {
+        const s = this.sessions.find(x => x.id === id); if (!s) throw new Error('Unfinished session not found');
+        if (this.cur && this.cur.id !== id) await this.flushDraft();      // pending drawing of the session being left
+        this.cur = s; this.result = null;
+      });
     }
     answerRead(ok) {
       return this._act(async () => {
         const s = this.cur; if (!s || s.kind !== 'read' || s.items[s.i].ok !== null) throw new Error('No open reading question');
-        const n = clone(s); n.items[n.i].ok = ok; n.i++;
+        const n = clone(s); n.items[n.i].ok = ok; n.i++; n.updatedAt = this.now();
         if (n.i >= n.items.length) return this._complete(n);
-        await this.store.saveSession(n); this.cur = n;
+        await this.store.saveSession(n); this._putSession(n);
       });
     }
     answerWrite(data) {
@@ -307,16 +482,16 @@
       return this._act(async () => {
         const s = this.cur; if (!s || s.kind !== 'write' || s.phase !== 'ask') throw new Error('No open writing question');
         await this.flushDraft();                 // pending handwriting autosave must succeed first
-        const n = clone(s); n.items[n.i].imgId = id; n.i++;
+        const n = clone(s); n.items[n.i].imgId = id; n.i++; n.updatedAt = this.now();
         if (n.i >= n.items.length) { n.phase = 'mark'; n.i = 0; }
-        await this.store.saveSession(n, { id, sid: s.id, data });   // also deletes the draft in the same transaction
-        this._dropDraft(); this.cur = n;
+        await this.store.saveSession(n, { id, sid: s.id, data });   // also deletes this session's draft in the same transaction
+        this._dropDraft(); this._putSession(n);
       });
     }
     setOk(k, v) {
       return this._act(async () => {
         const s = this.cur; if (!s || s.phase !== 'mark' || !s.items[k]) throw new Error('Not in marking phase');
-        const n = clone(s); n.items[k].ok = v; await this.store.saveSession(n); this.cur = n;
+        const n = clone(s); n.items[k].ok = v; n.updatedAt = this.now(); await this.store.saveSession(n); this._putSession(n);
       });
     }
     finishMarking() {
@@ -328,13 +503,19 @@
     async _complete(s) {
       const rec = buildRecord(s, this.now()), corr = buildCorrection(rec, this.now());
       await this.store.completeSession(rec, corr);   // record + (optional) correction written and session removed atomically
-      this.records.push(rec); if (corr) this.corrections.push(corr); this._dropDraft(); this.cur = null; this.result = rec;
+      this.records.push(rec); if (corr) this.corrections.push(corr); this._dropDraft(); this.sessions = this.sessions.filter(x => x.id !== s.id); this.cur = null; this.result = rec;
     }
-    discard(confirm) {
-      if (!this.cur) return Promise.resolve({ ok: true });
+    /* Discarding is always an explicit, confirmed action on ONE session (default: the current one); other sessions are untouched. */
+    discard(confirm, id) {
+      const t = id ? this.sessions.find(x => x.id === id) : this.cur;
+      if (!t) return Promise.resolve({ ok: true });
       if (!(confirm && confirm('確定放棄這次未完成的測驗？已作答的內容會被刪除。'))) return Promise.resolve({ ok: false, cancelled: true });
-      const sid = this.cur.id;
-      return this._act(async () => { await this.store.discardSession(sid); this._dropDraft(); this.cur = null; });
+      const sid = t.id;
+      return this._act(async () => {
+        await this.store.discardSession(sid);
+        if (this.cur && this.cur.id === sid) { this._dropDraft(); this.cur = null; }
+        this.sessions = this.sessions.filter(x => x.id !== sid);
+      });
     }
 
     /* writing-correction activities (separate from the records they came from; never change any score) */
@@ -356,7 +537,7 @@
         const c = this.correction(corrId); if (!c || c.state !== 'open') throw new Error('Correction activity is not open');
         if (!c.items[ci] || !Number.isInteger(ai) || ai < 0 || ai >= ATTEMPTS) throw new Error('No such attempt');
         if (data != null && !(typeof data === 'string' && /^data:image\//.test(data))) throw new Error('Invalid handwriting image');
-        const n = clone(c), old = n.items[ci].attempts[ai]; n.items[ci].attempts[ai] = imgId;
+        const n = clone(c), old = n.items[ci].attempts[ai]; n.items[ci].attempts[ai] = imgId; n.updatedAt = this.now();
         await this.store.saveCorrection(n, data ? { id: imgId, sid: c.id, data } : null, old);
         this.corrections = this.corrections.map(x => (x.id === corrId ? n : x));
       });
@@ -365,27 +546,31 @@
       return this._serial(async () => {
         const c = this.correction(corrId); if (!c || c.state !== 'open') throw new Error('Correction activity is not open');
         if (!c.items.every(attemptsDone)) throw new Error('Not every character has five saved attempts');
-        const n = clone(c); n.state = 'done'; n.completedAt = this.now();
+        const n = clone(c); n.state = 'done'; n.completedAt = this.now(); n.updatedAt = n.completedAt;
         await this.store.saveCorrection(n, null, null);
         this.corrections = this.corrections.map(x => (x.id === corrId ? n : x));
       });
     }
 
-    /* backup */
+    /* backup: one format (cq-backup, version 1). `sessions`, `drafts` and `corrections` are optional additions: an older file
+       without them still imports, and a file with them is still a valid version-1 file. */
     async exportBackup() {
       const all = await this.store.exportAll(); const im = new Map(all.images.map(i => [i.id, i.data])); let missing = 0;
-      const records = all.records.slice().sort((a, b) => (a.date || 0) - (b.date || 0)).map(r => ({ ...r, items: r.items.map(x => {
-        const { imgId, ...rest } = x;
-        if (imgId) { const data = im.get(imgId); if (data) return { ...rest, img: data }; missing++; }
-        return rest;
-      }) }));
-      return { missingImages: missing, json: { format: 'cq-backup', version: 1, exported: new Date(this.now()).toISOString(), data: { levels: sortLevels(all.levels), records } } };
+      const inline = x => { const { imgId, ...rest } = x; if (imgId) { const data = im.get(imgId); if (data) return { ...rest, img: data }; missing++; } return rest; };
+      const records = all.records.slice().sort((a, b) => (a.date || 0) - (b.date || 0)).map(r => ({ ...r, items: r.items.map(inline) }));
+      const sessions = (all.sessions || []).map(x => ({ ...x, items: x.items.map(inline) }));
+      const drafts = (all.drafts || []).filter(d => { const x = sessions.find(y => y.id === d.sid); return x && x.kind === 'write' && x.phase === 'ask' && x.i === d.qi && x.items[x.i].cid === d.cid; });   // never export an orphan/stale draft
+      const corrections = (all.corrections || []).slice().sort((a, b) => a.createdAt - b.createdAt).map(c => ({ ...c, items: c.items.map(it => ({ ...it, attempts: it.attempts.map(a => {
+        if (!a) return null; const data = im.get(a); if (data) return data; missing++; return null; }) })) }));
+      return { missingImages: missing, json: { format: 'cq-backup', version: 1, exported: new Date(this.now()).toISOString(), data: { levels: sortLevels(all.levels), records, sessions, drafts, corrections } } };
     }
     /* mode: 'merge' | 'replace'. Throws ImportError (validation) before touching any data. */
     async importBackup(json, mode, confirm, opts) {
       const data = validateBackup(json);
+      const ss = splitSessionImages(data.sessions), cc = splitCorrectionImages(data.corrections);
       if (mode === 'replace') {
-        const msg = '這會取代目前所有資料' + (this.cur ? '，包括未完成的測驗' : '') + '。建議先匯出目前的資料。確定要取代嗎？';
+        const openCorr = !data.provided.corrections && this.openCorrections().length;
+        const msg = '這會取代目前所有資料' + (this.sessions.length ? '，包括' + (data.provided.sessions ? '' : '（備份中沒有未完成的測驗）') + '未完成的測驗' : '') + (data.provided.corrections ? '' : (openCorr ? '（未完成的寫五次練習會保留）' : '')) + '。建議先匯出目前的資料。確定要取代嗎？';
         if (!(confirm && confirm(msg))) return { cancelled: true };
         const sp = splitImages(data.records);
         const ids = new Set(data.levels.map(l => l.id)), rids = new Set(data.records.map(r => r.id));
@@ -393,21 +578,26 @@
         const nl = data.records.filter(r => !ids.has(r.levelId)).length, np = data.records.filter(r => r.parentId && !rids.has(r.parentId)).length;
         if (nl) warnings.push(nl + ' 個紀錄所屬的級別不在備份中（紀錄仍會保留）');
         if (np) warnings.push(np + ' 個溫習紀錄找不到原本的測驗紀錄（仍會保留）');
-        await this.store.replaceAll({ levels: data.levels, records: sp.records, images: sp.images });
-        this._set(await this.store.loadAll());
-        return { mode, added: { levels: data.levels.length, chars: data.levels.reduce((n, l) => n + l.chars.length, 0), records: data.records.length }, conflicts: [], warnings, identical: 0 };
+        await this.store.replaceAll({ levels: data.levels, records: sp.records, images: [...sp.images, ...ss.images, ...cc.images], sessions: ss.sessions, drafts: data.drafts,
+          corrections: data.provided.corrections ? cc.corrections : undefined });
+        this.cur = null; this._set(await this.store.loadAll());
+        return { mode, added: { levels: data.levels.length, chars: data.levels.reduce((n, l) => n + l.chars.length, 0), records: data.records.length, sessions: data.sessions.length, corrections: data.corrections.length }, conflicts: [], warnings, identical: 0 };
       }
       const incoming = new Set(data.records.map(r => r.id)), imgIds = [];
       this.records.filter(r => incoming.has(r.id)).forEach(r => r.items.forEach(x => { if (x.imgId) imgIds.push(x.imgId); }));
+      const inS = new Set(data.sessions.map(x => x.id)), inC = new Set(data.corrections.map(x => x.id));
+      this.sessions.filter(x => inS.has(x.id)).forEach(x => x.items.forEach(it => { if (it.imgId) imgIds.push(it.imgId); }));
+      this.corrections.filter(x => inC.has(x.id)).forEach(x => x.items.forEach(it => it.attempts.forEach(a => { if (a) imgIds.push(a); })));
       const imgs = imgIds.length ? await this.store.getImages(imgIds) : {};
-      const plan = planMerge({ levels: this.levels, records: this.records }, data, this.now(), imgs);
+      const plan = planMerge({ levels: this.levels, records: this.records, sessions: this.sessions, corrections: this.corrections }, data, this.now(), imgs);
+      const none = { levels: 0, chars: 0, records: 0, sessions: 0, corrections: 0 };
       // Any conflict stops the merge: nothing is applied, so the data is never left half-merged.
-      if (plan.conflicts.length && !(opts && opts.allowPartial)) return { mode, aborted: true, added: { levels: 0, chars: 0, records: 0 }, conflicts: plan.conflicts, warnings: plan.warnings, identical: plan.identical };
-      await this.store.applyMerge({ newLevels: plan.newLevels, updatedLevels: plan.updatedLevels, records: plan.newRecords, images: plan.images });
+      if (plan.conflicts.length && !(opts && opts.allowPartial)) return { mode, aborted: true, added: none, conflicts: plan.conflicts, warnings: plan.warnings, identical: plan.identical };
+      await this.store.applyMerge({ newLevels: plan.newLevels, updatedLevels: plan.updatedLevels, records: plan.newRecords, images: plan.images, sessions: plan.newSessions, drafts: plan.newDrafts, corrections: plan.newCorrections });
       this._set(await this.store.loadAll());
       return { mode, added: plan.added, conflicts: plan.conflicts, warnings: plan.warnings, identical: plan.identical };
     }
   }
 
-  return { Quiz, ImportError, validateBackup, planMerge, splitImages, buildRecord, buildCorrection, attemptsDone, formatDuration, durationOf, ATTEMPTS, shuf, clone };
+  return { Quiz, ImportError, validateBackup, planMerge, splitImages, splitSessionImages, splitCorrectionImages, buildRecord, buildCorrection, correctionPosition, attemptsDone, formatDuration, durationOf, ATTEMPTS, shuf, clone };
 });

@@ -104,13 +104,17 @@ test('discarding requires explicit confirmation; leaving/refreshing never delete
   assert.equal(q.cur, null); assert.equal((await st.loadAll()).session, null); assert.equal((await st.exportAll()).images.length, 0);
 });
 
-test('starting a new session over an unfinished one needs confirmation and keeps completed records separate', async () => {
+test('starting another exercise keeps the unfinished one; only an identical duplicate needs confirmation to be replaced', async () => {
   const st = await newStore(); await seed(st);
   const q = await newQuiz(st); await q.startSession({ kind: 'read', levelId: 'L1', mode: 'practice' });
   const first = q.cur.id;
-  assert.equal((await q.startSession({ kind: 'read', levelId: 'L1', mode: 'practice' })).cancelled, true); assert.equal(q.cur.id, first);
-  assert.equal((await q.startSession({ kind: 'write', levelId: 'L1', mode: 'practice', confirm: () => true })).ok, true);
-  assert.notEqual(q.cur.id, first); assert.equal(q.records.length, 0);
+  const dup = await q.startSession({ kind: 'read', levelId: 'L1', mode: 'practice' });             // same level/kind/mode: never a second copy
+  assert.equal(dup.ok, false); assert.equal(dup.duplicate, true); assert.equal(dup.existing, first); assert.equal(q.cur.id, first); assert.equal(q.sessions.length, 1);
+  assert.equal((await q.startSession({ kind: 'write', levelId: 'L1', mode: 'practice' })).ok, true);   // a different exercise: both are kept
+  assert.notEqual(q.cur.id, first); assert.equal(q.sessions.length, 2); assert.ok(q.sessions.some(x => x.id === first)); assert.equal(q.records.length, 0);
+  assert.equal((await q.startSession({ kind: 'read', levelId: 'L1', mode: 'practice', confirm: () => false })).duplicate, true);   // declined replacement changes nothing
+  assert.equal((await q.startSession({ kind: 'read', levelId: 'L1', mode: 'practice', confirm: () => true })).ok, true);         // explicit replacement of the duplicate only
+  assert.equal(q.sessions.length, 2); assert.ok(!q.sessions.some(x => x.id === first)); assert.ok(q.sessions.some(x => x.kind === 'write'));
 });
 
 test('revision attempts are new records and never overwrite the original', async () => {
