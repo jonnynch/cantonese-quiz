@@ -8,6 +8,7 @@ const { newIdb, CH, level } = require('./helpers');
 const PUB = path.join(__dirname, '../public');
 const pageHtml = () => fs.readFileSync(path.join(PUB, 'index.html'), 'utf8').replace(/<script src="([^"]+)"><\/script>/g, (_, f) => '<script>' + fs.readFileSync(path.join(PUB, f), 'utf8') + '</script>');
 const wait = ms => new Promise(r => setTimeout(r, ms)), tick = () => wait(60);
+const until = async (f, ms = 4000) => { const t = Date.now(); while (!f() && Date.now() - t < ms) await wait(20); };   // wait for a condition, not a fixed time (the machine may be busy)
 const ev = (dom, code) => dom.window.eval(code);
 const ptr = { preventDefault() { }, pointerId: 1, clientX: 5, clientY: 5 };
 const stroke = el => { el.getBoundingClientRect = () => ({ left: 0, top: 0, width: 360, height: 360 }); el.onpointerdown(ptr); el.onpointerup(); };
@@ -53,7 +54,7 @@ test('a normal writing question submits exactly ONE utterance: character。word�
 test('the sample 左 is spoken as 左。左右嘅左 using the existing compound word', async () => {
   const idb = newIdb(), e = env(), id = await seed(idb), dom = await openPage(idb, e, id);
   ev(dom, "start('write','L1','practice')"); await tick();
-  ev(dom, "Q.cur.items[0].c = '左'; Q.cur.items[0].w = '左右'; autoKey = null; autoSpeak()"); await tick();
+  ev(dom, "Q.cur.items[0].c = '左'; Q.cur.items[0].w = '左右'; autoKey = null; autoSpeak()"); await until(() => said(e).includes('左。左右嘅左'));
   assert.equal(said(e).at(-1), '左。左右嘅左'); assert.equal(starts(e).filter(x => x.text === '左。左右嘅左').length, 1);
   dom.window.close();
 });

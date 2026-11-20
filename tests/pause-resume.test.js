@@ -79,15 +79,18 @@ test('a correction resumes at the exact character and attempt; finished attempts
   const { st, q } = await setup(4); const c = await correction(st, q), id = c.id, rec = JSON.stringify(q.records[0]);
   assert.equal(c.items.length, 2);
   for (let k = 0; k < 5; k++) await q.saveAttempt(id, 0, k, IMG + 'p' + k);
+  for (let k = 0; k < 5; k++) await q.markAttempt(id, 0, k, true); await q.finishSet(id, 0);                                  // first character: written, marked, finished
   await q.saveAttempt(id, 1, 0, IMG + 'q0'); await q.saveAttempt(id, 1, 1, IMG + 'q1'); await q.saveAttempt(id, 1, 2, null);   // blank canvas
-  assert.deepEqual(C.correctionPosition(q.correction(id)), { ci: 1, ai: 2, saved: 7, total: 10 });
+  assert.deepEqual(C.correctionPosition(q.correction(id)), { ci: 1, ai: 2, phase: 'write', saved: 7, total: 10 });
   const q2 = await reopen(st), c2 = q2.correction(id);
   assert.equal(c2.state, 'open'); assert.equal(q2.openCorrections().length, 1);
-  assert.deepEqual(C.correctionPosition(c2), { ci: 1, ai: 2, saved: 7, total: 10 });
+  assert.deepEqual(C.correctionPosition(c2), { ci: 1, ai: 2, phase: 'write', saved: 7, total: 10 });
   assert.deepEqual(c2.items.map(x => x.c), c.items.map(x => x.c));                               // order preserved
   assert.equal((await st.getImage(c2.items[0].attempts[3])).data, IMG + 'p3');
   assert.equal((await q2.completeCorrection(id)).ok, false);                                     // five attempts still required
   for (let k = 2; k < 5; k++) await q2.saveAttempt(id, 1, k, IMG + 'q' + k);
+  assert.equal((await q2.completeCorrection(id)).ok, false, 'written but not marked and finished');
+  for (let k = 0; k < 5; k++) await q2.markAttempt(id, 1, k, true); await q2.finishSet(id, 1);
   assert.equal((await q2.completeCorrection(id)).ok, true);
   assert.equal(JSON.stringify(q2.records[0]), rec, 'the original record/score never changes');
   assert.equal(q2.openCorrections().length, 0); assert.equal((await (await reopen(st)).corrections.length), 1);
@@ -144,7 +147,7 @@ test('backup contains unfinished sessions, drafts and corrections; replace resto
   assert.equal(r.added.sessions, 2); assert.equal(r.added.corrections, 1);
   const w = q2.sessions.find(x => x.kind === 'write'); assert.equal(w.i, 1); assert.equal((await st2.getImage(w.items[0].imgId)).data, IMG + 'u0');
   q2.cur = w; assert.equal((await q2.loadDraft()).data, IMG + 'DR');
-  const c2 = q2.correction(corr.id); assert.deepEqual(C.correctionPosition(c2), { ci: 0, ai: 2, saved: 2, total: 5 });
+  const c2 = q2.correction(corr.id); assert.deepEqual(C.correctionPosition(c2), { ci: 0, ai: 2, phase: 'write', saved: 2, total: 5 });
   assert.equal((await st2.getImage(c2.items[0].attempts[1])).data, IMG + 'k1');
   assert.deepEqual((await q2.exportBackup()).json.data.sessions.map(x => x.items.map(i => i.img || null)), json.data.sessions.map(x => x.items.map(i => i.img || null)));   // stable round trip
 });

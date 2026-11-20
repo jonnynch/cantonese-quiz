@@ -124,70 +124,155 @@ async function finishWriting(dom, wrongIdx) {      // answer every question with
   for (let i = 0; i < n; i++) { ev(dom, `setOk(${i}, ${!wrongIdx.includes(i)})`); await tick(); }
   ev(dom, 'finish()'); await tick(); await tick();
 }
-const prog = dom => dom.window.document.querySelector('#cprog').textContent;
-const slotsInk = async dom => (await ev(dom, 'Q.correction(corrId)')).items[ev(dom, 'corrIdx')].attempts.filter(Boolean).length;
+const streak = dom => dom.window.document.querySelector('#cstreak').textContent;
+const feedback = dom => dom.window.document.querySelector('#cfb').textContent;
+const canvasCount = dom => dom.window.document.querySelectorAll('#main canvas').length;
+const cmProg = dom => dom.window.document.querySelector('.mkprog').textContent.trim();
+const cmBtn = (dom, cls) => dom.window.document.querySelector('.mkrow .b.' + cls);
+const bothEnabled = dom => { const r = cmBtn(dom, 'r'), p = cmBtn(dom, 'p'); return !!r && !!p && !r.disabled && !p.disabled; };
+const tap = async (dom, el) => { el.click(); await tick(); await tick(); };                // a real tap on the real button
+const itemOf = dom => ev(dom, 'Q.correction(corrId).items[corrIdx]');
+const j = dom => (code) => JSON.parse(ev(dom, `JSON.stringify(${code})`));
+async function writeFive(dom) {                       // WRITING phase: five separate submissions, each on a fresh canvas
+  for (let k = 0; k < 5; k++) { assert.equal(canvasCount(dom), 1); stroke(dom.window.document.querySelector('#cc')); await ev(dom, 'submitAttempt()'); await tick(); }
+}
+async function markFive(dom, marks) { for (const v of marks) { assert.equal(bothEnabled(dom), true); await tap(dom, cmBtn(dom, v ? 'p' : 'r')); } }
+const finishBtn = dom => [...dom.window.document.querySelectorAll('.mkrow .b')].find(b => /完成這個字|重新寫五次/.test(b.textContent));
 
-test('writing correction: offered only when something was marked wrong, with five numbered canvases, progress and completion', async () => {
+test('writing correction: write five attempts first (no marking), then mark each one; a failed set starts a completely new set of five; five correct finish it', async () => {
   const idb = newIdb(), e = env(), id = await seed(idb, 3); const dom = await openPage(idb, e, { active: id });
-  await finishWriting(dom, []);                                                                                // everything correct
-  assert.match(main(dom), /全部正確/); assert.doesNotMatch(main(dom), /寫五次/); assert.equal(ev(dom, 'Q.corrections.length'), 0);
+  await finishWriting(dom, []); assert.match(main(dom), /全部正確/); assert.equal(ev(dom, 'Q.corrections.length'), 0);
   ev(dom, "go('practice')"); await tick();
   await finishWriting(dom, [0, 2]);                                                                            // two wrong characters
-  assert.match(main(dom), /寫五次練習（2 個字）/); assert.equal(ev(dom, 'Q.corrections.length'), 1);
-  const rid = ev(dom, 'res.id'), before = JSON.stringify(ev(dom, 'Q.records'));
+  assert.match(main(dom), /寫五次練習（2 個字）/); const rid = ev(dom, 'res.id'), before = JSON.stringify(ev(dom, 'Q.records')), recCount = ev(dom, 'Q.records.length');
   ev(dom, `openCorrection('corr-${rid}')`); await tick();
-  assert.match(main(dom), /呢個字未寫正確，請連續寫五次/);
-  const cvs = [...dom.window.document.querySelectorAll('.five canvas')]; assert.equal(cvs.length, 5);
-  assert.deepEqual([...dom.window.document.querySelectorAll('.slot .no')].map(x => x.textContent), ['1', '2', '3', '4', '5']);
-  const target = ev(dom, 'Q.correction(corrId).items[corrIdx]'); assert.match(main(dom), new RegExp(target.c)); assert.match(main(dom), new RegExp(target.w));
-  assert.match(prog(dom), /第 1 \/ 2 個字/); assert.match(prog(dom), /這個字 0 \/ 5/); assert.match(prog(dom), /總進度 0 \/ 10/);
-  assert.equal(dom.window.document.querySelector('#cnext').disabled, true);
-  stroke(cvs[0]); await wait(550); assert.match(prog(dom), /這個字 1 \/ 5/); assert.equal(await slotsInk(dom), 1);
-  stroke(cvs[1]); await wait(550); assert.match(prog(dom), /這個字 2 \/ 5/);
-  ev(dom, 'clrSlot(0)'); await wait(60); assert.match(prog(dom), /這個字 1 \/ 5/);                                // clearing one attempt leaves the others
-  const att = ev(dom, 'Q.correction(corrId).items[corrIdx].attempts'); assert.equal(att[0], null); assert.ok(att[1]);
-  stroke(cvs[0]); stroke(cvs[2]); stroke(cvs[3]); await wait(550); assert.equal(dom.window.document.querySelector('#cnext').disabled, true); assert.match(prog(dom), /4 \/ 5/);
-  stroke(cvs[4]); await wait(550); assert.match(prog(dom), /這個字 5 \/ 5/); assert.equal(dom.window.document.querySelector('#cnext').disabled, false);
-  ev(dom, 'nextChar()'); await tick(); await tick();                                                           // second character
-  assert.match(prog(dom), /第 2 \/ 2 個字/); assert.match(prog(dom), /這個字 0 \/ 5/); assert.match(prog(dom), /總進度 5 \/ 10/);
-  assert.match(btns(dom).join('|'), /完成/);
-  for (const c of [...dom.window.document.querySelectorAll('.five canvas')]) stroke(c);
-  await wait(550); ev(dom, 'nextChar()'); await tick(); await tick(); await tick();
-  assert.match(main(dom), /寫五次練習完成/); assert.match(main(dom), /10 \/ 10/);
-  assert.equal(ev(dom, 'Q.correction(corrId).state'), 'done'); assert.equal(JSON.stringify(ev(dom, 'Q.records')), before);   // original results unchanged
-  ev(dom, 'leaveCorr()'); await tick(); ev(dom, "go('practice')"); await tick(); assert.doesNotMatch(main(dom), /有未完成的寫五次/);
-  assert.equal(ev(dom, 'Q.corrections.length'), 1);                                                            // no duplicates after revisiting
+  // ---- writing phase
+  assert.match(main(dom), /① 寫字階段/); assert.match(dom.window.document.querySelector('#cprog').textContent, /第 1 \/ 2 個字/); assert.equal(canvasCount(dom), 1); assert.equal(dom.window.document.querySelectorAll('.five, .slot').length, 0);
+  const target = itemOf(dom); assert.match(main(dom), new RegExp(target.c)); assert.match(streak(dom), /寫字 1 \/ 5/); assert.equal(dom.window.document.querySelector('#csub').disabled, true);
+  await ev(dom, 'submitAttempt()'); assert.equal(ev(dom, 'Q.correction(corrId).items[corrIdx].attempts.filter(Boolean).length'), 0, 'a blank canvas cannot be submitted');
+  for (let k = 0; k < 4; k++) {
+    stroke(dom.window.document.querySelector('#cc')); assert.equal(dom.window.document.querySelector('#csub').disabled, false); await ev(dom, 'submitAttempt()'); await tick();
+    assert.match(streak(dom), new RegExp('寫字 ' + (k + 2) + ' \\/ 5')); assert.equal(ev(dom, 'Q.correction(corrId).items[corrIdx].attempts.filter(Boolean).length'), k + 1);
+    assert.equal(dom.window.document.querySelectorAll('.mkimg').length, 0, 'nothing to mark yet'); assert.equal(dom.window.document.querySelectorAll('.mkrow .b.r').length, 0, 'no marking controls while writing'); assert.equal(canvasCount(dom), 1);
+    assert.match(main(dom), /① 寫字階段/);
+  }
+  assert.equal(await ev(dom, 'Q.markAttempt(corrId, corrIdx, 0, true).then(r => r.ok)'), false, 'marking is refused during the writing phase');
+  assert.equal(ev(dom, 'cmIdx'), null);
+  stroke(dom.window.document.querySelector('#cc')); await ev(dom, 'submitAttempt()'); await tick(); await tick();                       // the fifth: marking begins by itself
+  // ---- marking phase: set 1 (four correct, one incorrect)
+  assert.match(main(dom), /② 評分階段/); assert.equal(canvasCount(dom), 0); assert.equal(cmProg(dom), '評分 1 / 5'); assert.equal(dom.window.document.querySelectorAll('.mkimg').length, 1); assert.equal(bothEnabled(dom), true);
+  assert.equal(ev(dom, 'Q.correction(corrId).items[corrIdx].attempts.filter(Boolean).length'), 5); const oldIds = j(dom)('Q.correction(corrId).items[corrIdx].attempts');
+  await tap(dom, cmBtn(dom, 'p')); assert.equal(cmProg(dom), '評分 2 / 5'); assert.equal(bothEnabled(dom), true, 'buttons stay usable after each mark'); assert.deepEqual(j(dom)('Q.correction(corrId).items[corrIdx].marks'), [true, null, null, null, null]);
+  const nav = txt => [...dom.window.document.querySelectorAll('.mkone .row .b')].find(b => b.textContent.trim() === txt);
+  await tap(dom, nav('上一次')); assert.equal(cmProg(dom), '評分 1 / 5'); assert.match(cmBtn(dom, 'p').className, /\bon\b/); assert.equal(nav('上一次').disabled, true);
+  await tap(dom, nav('下一次')); await tap(dom, nav('下一次')); assert.equal(cmProg(dom), '評分 3 / 5'); assert.equal(bothEnabled(dom), true);       // forward over an unmarked one
+  await tap(dom, cmBtn(dom, 'p')); await tap(dom, cmBtn(dom, 'p')); assert.equal(cmProg(dom), '評分 5 / 5'); assert.deepEqual(j(dom)('Q.correction(corrId).items[corrIdx].marks'), [true, null, true, true, null]);
+  ev(dom, 'goCm(1)'); await tick(); assert.equal(bothEnabled(dom), true); await tap(dom, cmBtn(dom, 'r'));                                           // 2: incorrect (changed later)
+  assert.equal(cmProg(dom), '評分 3 / 5'); ev(dom, 'goCm(4)'); await tick(); await tap(dom, cmBtn(dom, 'p'));                                          // 5: correct
+  assert.match(main(dom), /五次已評分：5 \/ 5/); assert.match(main(dom), /有 1 次寫得不正確/); assert.equal(finishBtn(dom).textContent.trim(), '重新寫五次');
+  ev(dom, 'goCm(1)'); await tick(); await tap(dom, cmBtn(dom, 'p')); ev(dom, 'goCm(2)'); await tick(); await tap(dom, cmBtn(dom, 'r')); await tap(dom, cmBtn(dom, 'p'));    // fix 2 -> correct, mark 3 incorrect
+  ev(dom, 'goCm(5)'); await tick(); assert.match(main(dom), /有 1 次寫得不正確/); assert.deepEqual(j(dom)('Q.correction(corrId).items[corrIdx].marks'), [true, true, false, true, true]);
+  await tap(dom, finishBtn(dom));                                                                                                                // finish the failed set
+  assert.match(main(dom), /① 寫字階段/); assert.match(streak(dom), /寫字 1 \/ 5/); assert.match(feedback(dom), /重新計算/); assert.equal(canvasCount(dom), 1);
+  assert.equal(ev(dom, 'Q.correction(corrId).items[corrIdx].attempts.filter(Boolean).length'), 0); assert.equal(ev(dom, 'Q.correction(corrId).items[corrIdx].failed'), 1); assert.equal(ev(dom, 'corrIdx'), 0);
+  for (const o of oldIds) assert.equal(await ev(dom, `store.getImage('${o}')`), null, 'the failed set is not reused');
+  // ---- set 2: a completely new set, all correct
+  await writeFive(dom); assert.match(main(dom), /② 評分階段/); const newIds = j(dom)('Q.correction(corrId).items[corrIdx].attempts'); assert.equal(newIds.filter(i => oldIds.includes(i)).length, 0);
+  await markFive(dom, [true, true, true, true, true]); assert.match(main(dom), /五次都寫得正確/); assert.equal(finishBtn(dom).textContent.trim(), '完成這個字');
+  await tap(dom, finishBtn(dom)); assert.match(dom.window.document.querySelector('#cprog').textContent, /第 2 \/ 2 個字/); assert.match(dom.window.document.querySelector('#cprog').textContent, /總進度 5 \/ 10/); assert.match(feedback(dom), /完成了/); assert.match(main(dom), /① 寫字階段/);
+  await writeFive(dom); await markFive(dom, [true, true, true, true, true]); await tap(dom, finishBtn(dom));
+  assert.match(main(dom), /寫五次練習完成/); assert.match(main(dom), /10 \/ 10/); assert.equal(ev(dom, 'Q.correction(corrId).state'), 'done');
+  assert.equal(JSON.stringify(ev(dom, 'Q.records')), before); assert.equal(ev(dom, 'Q.records.length'), recCount);                               // original result unchanged; no new questions
+  ev(dom, 'leaveCorr()'); await tick(); ev(dom, "go('practice')"); await tick(); assert.doesNotMatch(main(dom), /有未完成的寫五次/); assert.equal(ev(dom, 'Q.corrections.length'), 1);
   dom.window.close();
 });
 
-test('writing correction: completed attempts survive a refresh and the activity can be resumed', async () => {
+test('writing correction: the phase, submitted attempts, the unsubmitted drawing and the marks survive a refresh; a changed mark decides the outcome', async () => {
   const idb = newIdb(), e = env(), id = await seed(idb, 3); let dom = await openPage(idb, e, { active: id });
-  await finishWriting(dom, [1]); const cid = 'corr-' + ev(dom, 'res.id');
+  await finishWriting(dom, [1]); const cid = 'corr-' + ev(dom, 'res.id'), rec = JSON.stringify(ev(dom, 'Q.records'));
   ev(dom, `openCorrection('${cid}')`); await tick();
-  const cvs = [...dom.window.document.querySelectorAll('.five canvas')]; stroke(cvs[0]); stroke(cvs[2]); stroke(cvs[4]); await wait(550);
-  assert.match(prog(dom), /這個字 3 \/ 5/);
-  stroke(cvs[1]);                                                                                              // a stroke still waiting for its autosave when the tab goes away
-  await ev(dom, 'flushCorr()'); assert.match(prog(dom), /這個字 4 \/ 5/);
-  dom.window.close();
-  const e2 = env(); dom = await openPage(idb, e2, { active: id });                                             // refresh
-  assert.equal(ev(dom, 'Q.corrections.length'), 1); ev(dom, "go('practice')"); await tick();
-  assert.match(main(dom), /有未完成的寫五次練習/); assert.match(main(dom), /4 \/ 5/);
+  for (let k = 0; k < 3; k++) { stroke(dom.window.document.querySelector('#cc')); await ev(dom, 'submitAttempt()'); await tick(); }
+  stroke(dom.window.document.querySelector('#cc')); await ev(dom, 'flushCorr()'); assert.ok(ev(dom, 'Q.correction(corrId).items[0].pending'));        // a stroke of attempt 4, not submitted
+  ev(dom, 'leaveCorr()'); await tick(); dom.window.close();
+  let e2 = env(); dom = await openPage(idb, e2, { active: id });                                               // refresh 1: in the middle of writing
+  ev(dom, "go('practice')"); await tick(); assert.match(main(dom), /有未完成的寫五次練習/); assert.match(main(dom), /寫第 4 次/); assert.match(main(dom), /3 \/ 5/);
   ev(dom, `openCorrection('${cid}')`); await tick(); await tick();
-  assert.match(prog(dom), /這個字 4 \/ 5/); assert.equal(e2.drawn.length, 4);                                   // the four saved handwritings are drawn back
-  assert.equal(dom.window.document.querySelector('#cnext').disabled, true);
-  stroke([...dom.window.document.querySelectorAll('.five canvas')][3]); await wait(550);
-  assert.match(prog(dom), /這個字 5 \/ 5/); ev(dom, 'nextChar()'); await tick(); await tick(); await tick(); assert.match(main(dom), /寫五次練習完成/);
+  assert.match(main(dom), /① 寫字階段/); assert.match(streak(dom), /寫字 4 \/ 5/); assert.equal(e2.drawn.length, 1); assert.equal(dom.window.document.querySelector('#csub').disabled, false);   // the unfinished drawing is back
+  await ev(dom, 'submitAttempt()'); await tick(); stroke(dom.window.document.querySelector('#cc')); await ev(dom, 'submitAttempt()'); await tick(); await tick();
+  assert.match(main(dom), /② 評分階段/); await tap(dom, cmBtn(dom, 'p')); await tap(dom, cmBtn(dom, 'r')); assert.equal(cmProg(dom), '評分 3 / 5'); dom.window.close();
+  e2 = env(); dom = await openPage(idb, e2, { active: id });                                                   // refresh 2: in the middle of marking
+  ev(dom, "go('practice')"); await tick(); assert.match(main(dom), /評分中/);
+  ev(dom, `openCorrection('${cid}')`); await tick(); await tick();
+  assert.match(main(dom), /② 評分階段/); assert.equal(cmProg(dom), '評分 3 / 5'); assert.deepEqual(j(dom)('Q.correction(corrId).items[0].marks'), [true, false, null, null, null]); assert.equal(bothEnabled(dom), true);
+  await markFive(dom, [true, true, true]); assert.match(main(dom), /有 1 次寫得不正確/); assert.equal(finishBtn(dom).textContent.trim(), '重新寫五次'); dom.window.close();
+  e2 = env(); dom = await openPage(idb, e2, { active: id }); ev(dom, `openCorrection('${cid}')`); await tick(); await tick();       // refresh 3: all marked, not finished
+  assert.match(main(dom), /五次已評分：5 \/ 5/); assert.equal(ev(dom, 'Q.correction(corrId).items[0].confirmed'), false);
+  ev(dom, 'goCm(1)'); await tick(); await tap(dom, cmBtn(dom, 'p')); ev(dom, 'goCm(5)'); await tick(); assert.match(main(dom), /五次都寫得正確/); await tap(dom, finishBtn(dom));   // changed the one incorrect mark
+  assert.match(main(dom), /寫五次練習完成/); assert.equal(JSON.stringify(ev(dom, 'Q.records')), rec);
   dom.window.close();
 });
 
 test('writing correction: a failed save keeps the drawing, warns in Traditional Chinese and can be retried', async () => {
   const idb = newIdb(), e = env(), id = await seed(idb, 3); const dom = await openPage(idb, e, { active: id });
   await finishWriting(dom, [0]); ev(dom, `openCorrection('corr-${ev(dom, 'res.id')}')`); await tick();
-  ev(dom, 'Q.store = { ...Q.store, saveCorrection: () => Promise.reject(Object.assign(new Error("x"), { code: "quota" })) }');
-  const cvs = [...dom.window.document.querySelectorAll('.five canvas')]; stroke(cvs[0]); await wait(550);
+  ev(dom, 'Q.store = { ...Q.store, saveCorrection: () => Promise.reject(Object.assign(new Error(\"x\"), { code: \"quota\" })) }');
+  stroke(dom.window.document.querySelector('#cc')); await wait(550);
   const bar = dom.window.document.querySelector('#errbar'); assert.ok(bar && !bar.hidden); assert.match(bar.textContent, /沒有儲存成功/); assert.match(bar.textContent, /筆跡仍然保留/);
-  assert.equal(ev(dom, 'cs[0].dirty'), true); assert.match(prog(dom), /這個字 0 \/ 5/);                          // not counted as completed
+  assert.equal(ev(dom, 'ccv.dirty'), true); assert.match(streak(dom), /寫字 1 \/ 5/);                          // not submitted
   ev(dom, 'Q.store = store'); ev(dom, 'retryCorr()'); await tick(); await tick();
-  assert.match(prog(dom), /這個字 1 \/ 5/); assert.ok(dom.window.document.querySelector('#errbar').hidden);
+  assert.ok(ev(dom, 'Q.correction(corrId).items[0].pending')); assert.ok(dom.window.document.querySelector('#errbar').hidden);
+  dom.window.close();
+});
+
+/* ---------------- 5. parent marking: one writing answer at a time ---------------- */
+async function answerAll(dom, mode) {                // answer every question of a writing session (each with a stroke), leaving it in the marking phase
+  ev(dom, `start('write','L1','${mode}')`); await tick();
+  const n = ev(dom, 'Q.cur.items.length');
+  for (let i = 0; i < n; i++) { stroke(dom.window.document.querySelector('#cv')); ev(dom, 'done()'); await tick(); await tick(); }
+  return n;
+}
+const mkProg = dom => dom.window.document.querySelector('.mkprog').textContent.trim();
+const marks = dom => JSON.parse(ev(dom, 'JSON.stringify(Q.cur.items.map(x => x.ok))'));   // (plain array: jsdom arrays are another realm)
+
+test('exam writing marking: one answer at a time with progress; each mark is independent and advances; going back keeps marks; changing one updates the result', async () => {
+  const idb = newIdb(), e = env(), id = await seed(idb, 22); const dom = await openPage(idb, e, { active: id });
+  ev(dom, "go('exam')"); await tick(); const n = await answerAll(dom, 'exam'); assert.equal(n, 20); assert.equal(ev(dom, 'Q.cur.phase'), 'mark');
+  assert.equal(mkProg(dom), '1 / 20'); assert.equal(dom.window.document.querySelectorAll('.mkimg').length, 1, 'one answer on screen');
+  assert.equal(dom.window.document.querySelectorAll('.card.mk').length, 0, 'no grid of all answers');
+  assert.match(main(dom), new RegExp(ev(dom, 'Q.cur.items[0].c'))); assert.equal(dom.window.document.querySelector('.mkrow .b.r').textContent, '錯誤');
+  assert.equal(dom.window.document.querySelector('.mkrow .b.p').textContent, '正確');
+  await ev(dom, 'markOne(true)'); await tick(); assert.equal(mkProg(dom), '2 / 20');                          // marking advances to the next
+  assert.deepEqual(marks(dom).slice(0, 3), [true, null, null]);                                               // and marked nothing else
+  await ev(dom, 'markOne(false)'); await tick(); assert.equal(mkProg(dom), '3 / 20'); assert.deepEqual(marks(dom).slice(0, 4), [true, false, null, null]);
+  ev(dom, 'goMk(0)'); await tick(); assert.equal(mkProg(dom), '1 / 20'); assert.deepEqual(marks(dom).slice(0, 3), [true, false, null]);   // back: marks preserved
+  assert.match(dom.window.document.querySelector('.mkrow .b.p').className, /\bon\b/);                          // the existing mark is shown
+  assert.equal(dom.window.document.querySelector('.bar + .stage .row:last-child .b').disabled, true, 'no previous question before the first');
+  ev(dom, 'goMk(2)'); await tick();
+  for (let i = 2; i < 20; i++) { await ev(dom, 'markOne(true)'); await tick(); }                              // the rest correct
+  assert.match(main(dom), /20 \/ 20 題已評分/); assert.match(main(dom), /全部評分完成/); assert.equal(ev(dom, 'Q.cur.items.filter(x => x.ok === false).length'), 1);
+  assert.equal(dom.window.document.querySelector('.mkone .row:last-child .b.p').disabled, false);
+  ev(dom, 'goMk(0)'); await tick(); await ev(dom, 'markOne(false)'); await tick();                            // change an earlier mark
+  assert.deepEqual(marks(dom).slice(0, 2), [false, false]); assert.equal(mkProg(dom), '2 / 20');
+  ev(dom, 'goMk(20)'); await tick(); assert.match(main(dom), /全部評分完成/);
+  ev(dom, 'finish()'); await tick(); await tick();
+  const rec = ev(dom, 'Q.records.at(-1)'); assert.equal(rec.mode, 'exam'); assert.equal(rec.items.filter(x => x.ok).length, 18); assert.equal(rec.items.filter(x => !x.ok).length, 2);   // the final result reflects the changed mark
+  assert.match(main(dom), /寫五次練習（2 個字）/); assert.equal(ev(dom, 'Q.correction("corr-" + res.id).items.length'), 2);
+  dom.window.close();
+});
+
+test('marking: every answer must be marked before the assessment can be completed; no double marking; resumes at the first unmarked answer', async () => {
+  const idb = newIdb(), e = env(), id = await seed(idb, 3); let dom = await openPage(idb, e, { active: id });
+  const n = await answerAll(dom, 'practice'); assert.equal(n, 3);
+  ev(dom, 'markOne(true); markOne(true)'); await tick(); await tick();                                       // a double tap marks ONE answer only
+  assert.deepEqual(marks(dom), [true, null, null]); assert.equal(mkProg(dom), '2 / 3');
+  ev(dom, 'goMk(3)'); await tick(); assert.match(main(dom), /還有 2 題未評分/);                                // review with unmarked answers
+  assert.equal(dom.window.document.querySelector('.mkone .row:last-child .b.p').disabled, true);
+  await ev(dom, 'finish()'); await tick(); assert.equal(ev(dom, 'Q.records.length'), 0); assert.equal(ev(dom, 'Q.cur.phase'), 'mark');   // refused: nothing completed
+  ev(dom, 'leave()'); await tick(); dom.window.close();
+  dom = await openPage(idb, env(), { active: id }); ev(dom, "go('practice')"); await tick(); ev(dom, 'resume()'); await tick();
+  assert.equal(mkProg(dom), '2 / 3'); assert.deepEqual(marks(dom), [true, null, null]);                       // the saved mark is kept; continues where it stopped
+  await ev(dom, 'markOne(false)'); await tick(); await ev(dom, 'markOne(true)'); await tick(); assert.match(main(dom), /全部評分完成/);
+  ev(dom, 'finish()'); await tick(); await tick();
+  assert.equal(ev(dom, 'Q.records.length'), 1); assert.deepEqual(JSON.parse(ev(dom, 'JSON.stringify(Q.records[0].items.map(x => x.ok))')), [true, false, true]);
   dom.window.close();
 });
