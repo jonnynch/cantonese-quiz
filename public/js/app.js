@@ -109,9 +109,18 @@ function vPick(m) {
   });
   Q.openCorrections().forEach(c => { const p = CQCore.correctionPosition(c);
     h += `<div class="card"><b>有未完成的寫五次練習</b>（${esc(c.levelName)}，第 ${p.ci + 1} / ${c.items.length} 個字，${p.phase === 'mark' ? '評分中' : '寫第 ' + Math.min(p.ai + 1, 5) + ' 次'}，${p.saved} / ${p.total}）<div><small>上次作答：${fd(c.updatedAt || c.createdAt)}</small></div><div class="row"><button class="b p" data-id="${esc(c.id)}" onclick="openCorrection(this.dataset.id)">繼續</button></div></div>`; });
-  h += Q.levels.map(L => { const n = L.chars.length, low = ex && n < 20, ok = n && !low;
-    return `<div class="card"><h3>${esc(L.name)} <small>${n} 字</small></h3>${low ? '<div class="warn">需要至少 20 個字才可以考試。</div>' : ''}<div class="row"><button class="b p" ${ok ? '' : 'disabled'} onclick="start('read','${L.id}','${md}')">${lab[0]}</button><button class="b p" ${ok ? '' : 'disabled'} onclick="start('write','${L.id}','${md}')">${lab[1]}</button></div></div>`; }).join('') || '<p>請先到「級別管理」新增級別和字。</p>';
+  /* every level can always be started, whatever its mastery status: mastery is only this learner's own label (never a lock or a reward) */
+  h += Q.levels.map(L => { const n = L.chars.length, low = ex && n < 20, ok = n && !low, ms = Q.masteryOf(L.id).status;
+    return `<div class="card lvl ${ms}"><h3>${esc(L.name)} <small>${n} 字</small> <span class="mst ${ms}" role="status">${MS[ms][0]} ${MS[ms][1]}</span></h3>${low ? '<div class="warn">需要至少 20 個字才可以考試。</div>' : ''}<div class="row"><button class="b p" ${ok ? '' : 'disabled'} onclick="start('read','${L.id}','${md}')">${lab[0]}</button><button class="b p" ${ok ? '' : 'disabled'} onclick="start('write','${L.id}','${md}')">${lab[1]}</button></div>` +
+      `<div class="seg" role="group" aria-label="${esc(L.name)} 的掌握狀態">${['notStarted', 'learning', 'mastered'].map(s => `<button class="b seg-b ${ms === s ? 'on' : ''}" aria-pressed="${ms === s}" data-lid="${esc(L.id)}" onclick="setMastery(this.dataset.lid, '${s}')">${MS[s][0]} ${MS[s][1]}</button>`).join('')}</div></div>`; }).join('') || '<p>請先到「級別管理」新增級別和字。</p>';
   m.innerHTML = `<h2>${ex ? '考試' : '練習'}</h2>` + h;
+}
+const MS = { notStarted: ['⚪', '未開始'], learning: ['📖', '學習中'], mastered: ['⭐', '已掌握'] };
+/* change this learner's own mastery status of a level; nothing else changes (history, scores and statistics are untouched) */
+async function setMastery(levelId, status) {
+  const q = Q, r = await q.setMastery(levelId, status); if (q !== Q || r.busy) return;
+  if (!r.ok) { showBar(`<b>掌握狀態沒有儲存成功。</b>（${esc(reason(r.error))}）`, 'hideErr'); return; }
+  hideErr(); render();
 }
 /* Continue an unfinished session (id) or, without an id, the current one. Nothing is spoken again and nothing is reset. */
 async function resume(id) {

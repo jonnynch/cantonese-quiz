@@ -154,7 +154,12 @@
     if (d.stats !== undefined && !Array.isArray(d.stats)) statWarn.push('學習統計的格式不正確，已略過');
     else (d.stats || []).forEach(x => { const r = normStatsRow(x); if (!r || stats.some(y => y.cid === r.cid)) statWarn.push('略過一筆無效的學習統計'); else stats.push(r); });
     provided.stats = d.stats !== undefined && Array.isArray(d.stats);
-    return { levels, records, sessions, drafts, corrections, stats, statWarnings: statWarn.length ? [statWarn.length + ' 筆學習統計無效，已略過'] : [], provided };
+    /* Optional mastery statuses: a manual label, so malformed entries are skipped with a warning (never a rejected file) */
+    const mastery = [], mWarn = [];
+    if (d.mastery !== undefined && !Array.isArray(d.mastery)) mWarn.push('級別掌握狀態的格式不正確，已略過');
+    else (d.mastery || []).forEach(x => { const r = normMasteryRow(x); if (!r || mastery.some(y => y.levelId === r.levelId)) mWarn.push('略過一筆無效的級別掌握狀態'); else mastery.push(r); });
+    provided.mastery = d.mastery !== undefined && Array.isArray(d.mastery);
+    return { levels, records, sessions, drafts, corrections, stats, mastery, statWarnings: [...(statWarn.length ? [statWarn.length + ' 筆學習統計無效，已略過'] : []), ...(mWarn.length ? [mWarn.length + ' 筆級別掌握狀態無效，已略過'] : [])], provided };
   }
 
   /* Move inline `img` data out of record items into separate image rows (stored in IndexedDB). */
@@ -256,8 +261,8 @@
      existingImages: { imgId: dataURL } for the existing records that share an ID with an incoming one. */
   function planMerge(existing, incoming, now, existingImages) {
     const P = { newLevels: [], updatedLevels: [], newRecords: [], newSessions: [], newDrafts: [], newCorrections: [], images: [], conflicts: [], warnings: [], identical: 0, added: { levels: 0, chars: 0, records: 0, sessions: 0, corrections: 0 } };
-    existing = { ...existing, sessions: existing.sessions || [], corrections: existing.corrections || [], stats: existing.stats || [] };
-    P.newStats = [];
+    existing = { ...existing, sessions: existing.sessions || [], corrections: existing.corrections || [], stats: existing.stats || [], mastery: existing.mastery || [] };
+    P.newStats = []; P.newMastery = [];
     incoming = { ...incoming, sessions: incoming.sessions || [], drafts: incoming.drafts || [], corrections: incoming.corrections || [] };
     const lvMap = new Map(existing.levels.map(l => [l.id, l]));
     const owner = new Map(); existing.levels.forEach(l => l.chars.forEach(c => owner.set(c.id, { lid: l.id, c })));
@@ -320,6 +325,7 @@
     });
     const sc = splitCorrectionImages(cs2); P.newCorrections = sc.corrections; P.images.push(...sc.images); P.added.corrections = sc.corrections.length;
     { const have = new Set(existing.stats.map(x => x.cid)); P.newStats = (incoming.stats || []).filter(x => !have.has(x.cid)); }   // statistics of this device always win (never overwritten)
+    { const have = new Set(existing.mastery.map(x => x.levelId)); P.newMastery = (incoming.mastery || []).filter(x => !have.has(x.levelId)); }   // this learner's own setting always wins
     const noLevel = fresh.filter(r => !levelIds.has(r.levelId)).length, noParent = fresh.filter(r => r.parentId && !recIds.has(r.parentId)).length;
     if (noLevel) P.warnings.push(noLevel + ' 個紀錄所屬的級別不在資料中（紀錄仍會保留，以當時的級別名稱顯示）');
     if (noParent) P.warnings.push(noParent + ' 個溫習紀錄找不到原本的測驗紀錄（仍會保留）');
@@ -445,6 +451,16 @@
     return [...rows.values()];
   }
 
+  /* ---------------- Level mastery (per learner) ----------------
+     The learner (or parent) marks each level as not started / learning / mastered. It is stored in the LEARNER's own data, never with the shared level, and it
+     is only a label: it never creates records, scores or statistics and nothing is gated by it. Without a manual status the level shows 'learning' when this
+     learner has any history for it, otherwise 'notStarted'. */
+  const MASTERY = ['notStarted', 'learning', 'mastered'];
+  function normMasteryRow(x) {
+    if (!x || typeof x !== 'object' || typeof x.levelId !== 'string' || !x.levelId || !MASTERY.includes(x.status)) return null;
+    return { levelId: x.levelId, status: x.status, at: Number.isFinite(x.at) && x.at > 0 ? x.at : null };
+  }
+
   function buildRecord(s, now) {
     return { id: s.id, levelId: s.levelId, levelName: s.levelName || '', kind: s.kind, mode: s.mode, parentId: s.parentId || null,
       ...(Number.isFinite(s.started) ? { started: s.started } : {}), date: now,   // started = real session start, date = completion time
@@ -475,7 +491,7 @@
     constructor(store, o) {
       o = o || {};
       this.store = store; this.content = o.content || null; this.uid = o.uid || defaultUid; this.now = o.now || Date.now; this.shuffle = o.shuffle || shuf; this.random = o.random || Math.random;
-      this._lv = []; this.records = []; this.sessions = []; this.stats = new Map(); this._q = null; this.cur = null; this.busy = false; this.retry = null; this.result = null;
+      this._lv = []; this.records = []; this.sessions = []; this.stats = new Map(); this.mastery = new Map(); this._q = null; this.cur = null; this.busy = false; this.retry = null; this.result = null;
       this.draftDelay = o.draftDelay == null ? 400 : o.draftDelay;
       this.onDraftError = null; this.onDraftOk = null; this.draftError = null;
       this._pend = null; this._timer = null; this._flushing = null; this._flushRunning = false; this.closed = false; this._lastAct = Promise.resolve(); this._cq = Promise.resolve(); this.corrections = []; this._seq = Date.now() * 1000;
@@ -497,6 +513,22 @@
       this.cur = (this.cur && this.sessions.find(x => x.id === this.cur.id)) || this.sessions[0] || null;   // cur = the session being worked on / most recent
       this.corrections = (d.corrections || []).map(upgradeCorrection).sort((a, b) => a.createdAt - b.createdAt);
       this.stats = new Map((d.stats || []).map(normStatsRow).filter(Boolean).map(r => [r.cid, r]));   // malformed rows can never crash the app
+      this.mastery = new Map((d.mastery || []).map(normMasteryRow).filter(Boolean).map(r => [r.levelId, r]));
+    }
+    /* { status: 'notStarted' | 'learning' | 'mastered', manual } for a level of THIS learner */
+    masteryOf(levelId) {
+      const r = this.mastery.get(levelId); if (r) return { status: r.status, manual: true };
+      const seen = this.records.some(x => x.levelId === levelId) || this.sessions.some(x => x.levelId === levelId);
+      return { status: seen ? 'learning' : 'notStarted', manual: false };
+    }
+    /* set the manual status (null = back to automatic). Only the learner's mastery row is written: history, statistics and the level are untouched. */
+    setMastery(levelId, status) {
+      return this._serial(async () => {
+        if (typeof levelId !== 'string' || !levelId) throw new Error('No such level');
+        if (status === null) { await this.store.deleteMastery(levelId); this.mastery.delete(levelId); return; }
+        if (!MASTERY.includes(status)) throw new Error('Invalid mastery status');
+        const row = { levelId, status, at: this.now() }; await this.store.setMastery(row); this.mastery.set(levelId, row);
+      });
     }
     skillStats(kind, cid) { const r = this.stats.get(cid); return normSkill(r && KINDS.includes(kind) ? r[kind] : null); }
     priorityOf(kind, cid) { return priority(this.skillStats(kind, cid)); }
@@ -775,11 +807,12 @@
       const inline = x => { const { imgId, ...rest } = x; if (imgId) { const data = im.get(imgId); if (data) return { ...rest, img: data }; missing++; } return rest; };
       const records = all.records.slice().sort((a, b) => (a.date || 0) - (b.date || 0)).map(r => ({ ...r, items: r.items.map(inline) }));
       const stats = (all.stats || []).map(normStatsRow).filter(Boolean).sort((a, b) => (a.cid < b.cid ? -1 : 1));
+      const mastery = (all.mastery || []).map(normMasteryRow).filter(Boolean).sort((a, b) => (a.levelId < b.levelId ? -1 : 1));
       const sessions = (all.sessions || []).map(x => ({ ...x, items: x.items.map(inline) }));
       const drafts = (all.drafts || []).filter(d => { const x = sessions.find(y => y.id === d.sid); return x && x.kind === 'write' && x.phase === 'ask' && x.i === d.qi && x.items[x.i].cid === d.cid; });   // never export an orphan/stale draft
       const inl = a => { if (!a) return null; const data = im.get(a); if (data) return data; missing++; return null; };
       const corrections = (all.corrections || []).map(upgradeCorrection).sort((a, b) => a.createdAt - b.createdAt).map(c => ({ ...c, items: c.items.map(it => ({ ...it, attempts: it.attempts.map(inl), pending: inl(it.pending) })) }));
-      return { missingImages: missing, json: { format: 'cq-backup', version: 1, exported: new Date(this.now()).toISOString(), data: { levels: this.content ? [] : sortLevels(all.levels), records, sessions, drafts, corrections, stats } } };
+      return { missingImages: missing, json: { format: 'cq-backup', version: 1, exported: new Date(this.now()).toISOString(), data: { levels: this.content ? [] : sortLevels(all.levels), records, sessions, drafts, corrections, stats, mastery } } };
     }
     /* mode: 'merge' | 'replace'. Throws ImportError (validation) before touching any data. */
     async importBackup(json, mode, confirm, opts) {
@@ -798,7 +831,7 @@
         if (np) warnings.push(np + ' 個溫習紀錄找不到原本的測驗紀錄（仍會保留）');
         await this.store.replaceAll({ levels: data.levels, records: sp.records, images: [...sp.images, ...ss.images, ...cc.images], sessions: ss.sessions, drafts: data.drafts,
           corrections: data.provided.corrections ? cc.corrections : undefined,
-          stats: data.provided.stats ? data.stats : statsFromRecords(sp.records) });      // an older backup has none: rebuilt from its records
+          stats: data.provided.stats ? data.stats : statsFromRecords(sp.records), mastery: data.provided.mastery ? data.mastery : undefined });      // an older backup has none: rebuilt from its records
         this.cur = null; this._set(await this.store.loadAll());
         return { mode, added: { levels: data.levels.length, chars: data.levels.reduce((n, l) => n + l.chars.length, 0), records: data.records.length, sessions: data.sessions.length, corrections: data.corrections.length }, conflicts: [], warnings, identical: 0 };
       }
@@ -808,15 +841,15 @@
       this.sessions.filter(x => inS.has(x.id)).forEach(x => x.items.forEach(it => { if (it.imgId) imgIds.push(it.imgId); }));
       this.corrections.filter(x => inC.has(x.id)).forEach(x => x.items.forEach(it => { it.attempts.forEach(a => { if (a) imgIds.push(a); }); if (it.pending) imgIds.push(it.pending); }));
       const imgs = imgIds.length ? await this.store.getImages(imgIds) : {};
-      const plan = planMerge({ levels: this.levels, records: this.records, sessions: this.sessions, corrections: this.corrections, stats: [...this.stats.values()] }, data, this.now(), imgs);
+      const plan = planMerge({ levels: this.levels, records: this.records, sessions: this.sessions, corrections: this.corrections, stats: [...this.stats.values()], mastery: [...this.mastery.values()] }, data, this.now(), imgs);
       const none = { levels: 0, chars: 0, records: 0, sessions: 0, corrections: 0 };
       // Any conflict stops the merge: nothing is applied, so the data is never left half-merged.
       if (plan.conflicts.length && !(opts && opts.allowPartial)) return { mode, aborted: true, added: none, conflicts: plan.conflicts, warnings: plan.warnings, identical: plan.identical };
-      await this.store.applyMerge({ newLevels: plan.newLevels, updatedLevels: plan.updatedLevels, records: plan.newRecords, images: plan.images, sessions: plan.newSessions, drafts: plan.newDrafts, corrections: plan.newCorrections, stats: plan.newStats });
+      await this.store.applyMerge({ newLevels: plan.newLevels, updatedLevels: plan.updatedLevels, records: plan.newRecords, images: plan.images, sessions: plan.newSessions, drafts: plan.newDrafts, corrections: plan.newCorrections, stats: plan.newStats, mastery: plan.newMastery });
       this._set(await this.store.loadAll());
       return { mode, added: plan.added, conflicts: plan.conflicts, warnings: [...data.statWarnings, ...plan.warnings], identical: plan.identical };
     }
   }
 
-  return { Quiz, SharedContent, ADAPT, normStatsRow, applyAnswer, priority, learningStatus, weightedSample, statsFromRecords, classifyMs, ImportError, validateBackup, planMerge, splitImages, splitSessionImages, splitCorrectionImages, buildRecord, buildCorrection, correctionPosition, attemptsDone, itemPhase, upgradeCorrection, formatDuration, durationOf, ATTEMPTS, shuf, clone };
+  return { Quiz, SharedContent, MASTERY, normMasteryRow, ADAPT, normStatsRow, applyAnswer, priority, learningStatus, weightedSample, statsFromRecords, classifyMs, ImportError, validateBackup, planMerge, splitImages, splitSessionImages, splitCorrectionImages, buildRecord, buildCorrection, correctionPosition, attemptsDone, itemPhase, upgradeCorrection, formatDuration, durationOf, ATTEMPTS, shuf, clone };
 });

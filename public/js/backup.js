@@ -3,7 +3,7 @@
    {
      format: 'cq-backup', schemaVersion: 2, exportedAt: ISO,
      content:  { levels: [ { id, name, desc, chars: [ { id, c, jp, w, wjp, m } ], created, modified } ] },   // ONCE; characters carry their word data
-     profiles: [ { profileId, profileName, avatar, data: { records, sessions, drafts, corrections, stats } } ]   // one entry per learner
+     profiles: [ { profileId, profileName, avatar, data: { records, sessions, drafts, corrections, stats, mastery } } ]   // one entry per learner
    }
 
    Either part may be absent: content only, progress only, or both; no learner is needed to export or import content.
@@ -13,7 +13,7 @@
   const m = factory((typeof module === 'object' && module.exports) ? require('./core.js') : root.CQCore, (typeof module === 'object' && module.exports) ? require('./profiles.js') : root.CQProfiles);
   if (typeof module === 'object' && module.exports) module.exports = m; else root.CQBackup = m;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (C, P) {
-  const FORMAT = 'cq-backup', SCHEMA = 2, PROGRESS_KEYS = ['records', 'sessions', 'drafts', 'corrections', 'stats'];
+  const FORMAT = 'cq-backup', SCHEMA = 2, PROGRESS_KEYS = ['records', 'sessions', 'drafts', 'corrections', 'stats', 'mastery'];
   const isObj = x => x && typeof x === 'object' && !Array.isArray(x);
   const wrap = data => ({ format: FORMAT, version: 1, exported: '', data });
   const fail = list => { throw new C.ImportError(list); };
@@ -40,8 +40,8 @@
   }
 
   /* ---------------- parse + validate (nothing is changed) ---------------- */
-  function summary(v) { return { records: v.records.length, sessions: v.sessions.length, corrections: v.corrections.length, stats: v.stats.length }; }
-  const hasProgress = s => s.records || s.sessions || s.corrections || s.stats;
+  function summary(v) { return { records: v.records.length, sessions: v.sessions.length, corrections: v.corrections.length, stats: v.stats.length, mastery: v.mastery.length }; }
+  const hasProgress = s => s.records || s.sessions || s.corrections || s.stats || s.mastery;
   function parse(json) {
     if (!isObj(json) || json.format !== FORMAT) fail(['這不是有效的備份檔']);
     if (json.schemaVersion === 2) {
