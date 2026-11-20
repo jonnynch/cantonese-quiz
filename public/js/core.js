@@ -139,9 +139,11 @@
         if (!isObj(it) || !isStr(it.cid) || !it.cid || !isStr(it.c) || !it.c || ![it.jp, it.w, it.wjp].every(optStr)) { ok = false; return add(lab + '資料有誤'); }
         if (!Array.isArray(it.attempts) || it.attempts.length !== ATTEMPTS || !it.attempts.every(a => a == null || (a !== '' && okImg(a)))) { ok = false; return add(lab + '的手寫次數資料有誤'); }
         if (x.state === 'done' && !it.attempts.every(Boolean)) { ok = false; return add(lab + '標示為已完成，但沒有五次手寫圖片'); }
-        if (!okImg(it.pending) || (it.checking != null && typeof it.checking !== 'boolean')) { ok = false; return add(lab + '的目前手寫資料有誤'); }
-        items.push({ cid: it.cid, c: it.c, jp: str(it.jp), w: str(it.w), wjp: str(it.wjp), attempts: it.attempts.map(a => a || null),
-          pending: x.state === 'done' ? null : (it.pending || null), checking: x.state === 'done' ? false : !!(it.checking && it.pending) });
+        if (!okImg(it.pending) || (it.checking != null && typeof it.checking !== 'boolean') || (it.confirmed != null && typeof it.confirmed !== 'boolean')
+          || (it.failed != null && !Number.isInteger(it.failed)) || (it.marks != null && !(Array.isArray(it.marks) && it.marks.length === ATTEMPTS && it.marks.every(m => m === null || typeof m === 'boolean')))) { ok = false; return add(lab + '的目前手寫資料有誤'); }
+        const raw = { cid: it.cid, c: it.c, jp: str(it.jp), w: str(it.w), wjp: str(it.wjp), attempts: it.attempts.map(a => a || null), pending: x.state === 'done' ? null : (it.pending || null),
+          ...(it.marks != null ? { marks: it.marks } : {}), ...(it.confirmed != null ? { confirmed: it.confirmed } : {}), ...(it.failed != null ? { failed: it.failed } : {}), ...(it.checking ? { checking: true } : {}) };
+        items.push(x.state === 'done' ? { ...upgradeItem({ ...raw, marks: Array(ATTEMPTS).fill(true), confirmed: true }) } : upgradeItem(raw));
       });
       if (ok) corrections.push({ id: x.id, sourceId: x.sourceId, sourceKind: 'write', sourceMode: x.sourceMode, levelId: x.levelId, levelName: str(x.levelName), createdAt: x.createdAt,
         ...(Number.isFinite(x.updatedAt) ? { updatedAt: x.updatedAt } : {}), completedAt: x.state === 'done' ? x.completedAt : null, state: x.state, items });
@@ -181,7 +183,7 @@
     const out = corrections.map(c => ({ ...c, items: c.items.map((it, ci) => ({ ...it, attempts: it.attempts.map((a, ai) => {
       if (!a) return null;
       const id = 'imp-' + c.id + '-' + ci + '-' + ai; images.push({ id, sid: c.id, data: a }); return id;
-    }), pending: it.pending ? (() => { const id = 'imp-' + c.id + '-' + ci + '-p'; images.push({ id, sid: c.id, data: it.pending }); return id; })() : null, checking: !!(it.checking && it.pending) })) }));
+    }), pending: it.pending ? (() => { const id = 'imp-' + c.id + '-' + ci + '-p'; images.push({ id, sid: c.id, data: it.pending }); return id; })() : null })) }));
     return { corrections: out, images };
   }
 
@@ -237,7 +239,7 @@
   function normCorrection(x, imgs) {
     const im = id => (id ? (imgs && imgs[id]) || (/^data:/.test(id) ? id : '<missing:' + id + '>') : null);
     return { sourceId: x.sourceId, levelId: x.levelId, state: x.state, completedAt: x.completedAt || null,
-      items: x.items.map(it => ({ cid: it.cid, c: it.c, attempts: it.attempts.map(im), pending: im(it.pending || null), checking: !!it.checking })) };
+      items: x.items.map(it => ({ cid: it.cid, c: it.c, attempts: it.attempts.map(im), pending: im(it.pending || null), marks: (it.marks || []).join(','), confirmed: !!it.confirmed, failed: it.failed | 0 })) };
   }
   function correctionDiffs(a, b) {
     const o = [];
@@ -245,7 +247,7 @@
     if (a.items.length !== b.items.length) o.push('字數不同');
     for (let k = 0; k < Math.min(a.items.length, b.items.length); k++) {
       const x = a.items[k], y = b.items[k];
-      if (x.cid !== y.cid) o.push('第 ' + (k + 1) + ' 個字不同'); else if (x.attempts.some((t, j) => t !== y.attempts[j]) || x.pending !== y.pending || x.checking !== y.checking) o.push('第 ' + (k + 1) + ' 個字的手寫次數不同');
+      if (x.cid !== y.cid) o.push('第 ' + (k + 1) + ' 個字不同'); else if (x.attempts.some((t, j) => t !== y.attempts[j]) || x.pending !== y.pending || x.marks !== y.marks || x.confirmed !== y.confirmed || x.failed !== y.failed) o.push('第 ' + (k + 1) + ' 個字的手寫次數不同');
     }
     return o;
   }
@@ -334,14 +336,39 @@
   const durationOf = r => formatDuration(r && r.started, r && r.date);
 
   /* ---- writing correction: write each wrongly written character five times ---- */
-  const attemptsDone = it => it.attempts.length === ATTEMPTS && it.attempts.every(Boolean) && new Set(it.attempts).size === ATTEMPTS;   // five distinct saved images
-  /* The exact point to resume a correction activity at: first character that still lacks five saved attempts, and the next
-     empty attempt slot of that character (0-based `ai`; ai + 1 is the attempt number shown to the learner). */
+  const fiveDistinct = it => Array.isArray(it.attempts) && it.attempts.length === ATTEMPTS && it.attempts.every(Boolean) && new Set(it.attempts).size === ATTEMPTS;   // five distinct saved images
+  /* One character of a correction activity has a current SET of five attempts: 'write' (fewer than five submitted: no marking yet), 'mark' (all five
+     submitted: each is marked individually), 'done' (the set was finished with all five marked correct). Any incorrect mark makes the finished set
+     void: a completely new set is written. Items from before marking existed (no `marks` at all) with five saved attempts count as done. */
+  const attemptsDone = it => fiveDistinct(it) && (it.confirmed === true || it.marks === undefined);
+  const itemPhase = it => (attemptsDone(it) ? 'done' : fiveDistinct(it) ? 'mark' : 'write');
+  /* Bring an item (from the database or a backup of an older version) to the current shape: attempts / marks (5 each) / pending / confirmed / failed.
+     An older "streak" item (attempts = confirmed correct attempts so far, `checking` = submitted but unmarked) keeps every image: the streak becomes
+     already-correct marks of the new set, and a submitted-unmarked drawing becomes the next submitted attempt. */
+  function upgradeItem(it) {
+    const out = { ...it }; delete out.checking;
+    let att = (it.attempts || []).slice(0, ATTEMPTS); while (att.length < ATTEMPTS) att.push(null);
+    let marks = Array.isArray(it.marks) ? it.marks.slice(0, ATTEMPTS).map(m => (m === true || m === false ? m : null)) : null, pending = it.pending || null;
+    if (!marks) {
+      if (att.every(Boolean)) { out.attempts = att; out.marks = Array(ATTEMPTS).fill(true); out.confirmed = true; out.pending = null; out.failed = nz(it.failed); return out; }   // older finished character
+      marks = att.map(a => (a ? true : null));
+      if (it.checking && pending) { const k = att.findIndex(a => !a); if (k >= 0) { att[k] = pending; marks[k] = null; pending = null; } }
+    }
+    while (marks.length < ATTEMPTS) marks.push(null);
+    out.attempts = att; out.marks = marks.map((m, i) => (att[i] ? m : null)); out.pending = pending;
+    out.confirmed = it.confirmed === true && fiveDistinct(out) && out.marks.every(m => m === true); out.failed = nz(it.failed);
+    if (out.confirmed === false && itemPhase(out) === 'write' && out.pending && att.every(Boolean)) out.pending = null;
+    return out;
+  }
+  const upgradeCorrection = c => (c && Array.isArray(c.items) ? { ...c, items: c.items.map(upgradeItem) } : c);
+  /* The exact point to resume a correction activity at: the first character whose set is not finished, its phase, and where in that phase
+     (write: the next empty attempt slot `ai`, 0-based; mark: the first unmarked attempt, or 5 when all five are marked). `saved` = attempts done so far. */
   function correctionPosition(c) {
-    const total = c.items.reduce((t, x) => t + x.attempts.filter(Boolean).length, 0), ci = c.items.findIndex(x => !attemptsDone(x));
-    if (ci < 0) return { ci: Math.max(0, c.items.length - 1), ai: ATTEMPTS, saved: total, total: c.items.length * ATTEMPTS };
-    const ai = c.items[ci].attempts.findIndex(a => !a);
-    return { ci, ai: ai < 0 ? ATTEMPTS : ai, saved: total, total: c.items.length * ATTEMPTS };
+    const total = c.items.length * ATTEMPTS, saved = c.items.reduce((t, x) => t + (attemptsDone(x) ? ATTEMPTS : x.attempts.filter(Boolean).length), 0), ci = c.items.findIndex(x => !attemptsDone(x));
+    if (ci < 0) return { ci: Math.max(0, c.items.length - 1), ai: ATTEMPTS, phase: 'done', saved, total };
+    const it = c.items[ci], phase = itemPhase(it);
+    const ai = phase === 'write' ? it.attempts.findIndex(a => !a) : (() => { const k = (it.marks || []).findIndex(m => m === null || m === undefined); return k < 0 ? ATTEMPTS : k; })();
+    return { ci, ai: ai < 0 ? ATTEMPTS : ai, phase, saved, total };
   }
   function buildCorrection(rec, now) {
     if (rec.kind !== 'write' || !CORRECTION_MODES.includes(rec.mode)) return null;
@@ -349,7 +376,7 @@
     if (!bad.length) return null;
     return { id: 'corr-' + rec.id, sourceId: rec.id, sourceKind: rec.kind, sourceMode: rec.mode, levelId: rec.levelId, levelName: rec.levelName || '',
       createdAt: now, updatedAt: now, completedAt: null, state: 'open',
-      items: bad.map(x => ({ cid: x.cid, c: x.c, jp: x.jp || '', w: x.w || '', wjp: x.wjp || '', attempts: Array(ATTEMPTS).fill(null), pending: null, checking: false })) };
+      items: bad.map(x => ({ cid: x.cid, c: x.c, jp: x.jp || '', w: x.w || '', wjp: x.wjp || '', attempts: Array(ATTEMPTS).fill(null), marks: Array(ATTEMPTS).fill(null), pending: null, confirmed: false, failed: 0 })) };
   }
 
   /* ---------------- Adaptive learning: per-character statistics, priority, weighted sampling ----------------
@@ -468,7 +495,7 @@
       if (!this.content) this.levels = sortLevels(d.levels); this.records = d.records.slice().sort((a, b) => (a.date || 0) - (b.date || 0));
       this.sessions = (d.sessions || (d.session ? [d.session] : [])).slice();   // every unfinished session, newest first
       this.cur = (this.cur && this.sessions.find(x => x.id === this.cur.id)) || this.sessions[0] || null;   // cur = the session being worked on / most recent
-      this.corrections = (d.corrections || []).slice().sort((a, b) => a.createdAt - b.createdAt);
+      this.corrections = (d.corrections || []).map(upgradeCorrection).sort((a, b) => a.createdAt - b.createdAt);
       this.stats = new Map((d.stats || []).map(normStatsRow).filter(Boolean).map(r => [r.cid, r]));   // malformed rows can never crash the app
     }
     skillStats(kind, cid) { const r = this.stats.get(cid); return normSkill(r && KINDS.includes(kind) ? r[kind] : null); }
@@ -672,52 +699,63 @@
       this._cq = run.then(() => { }, () => { }); return run;
     }
     /* data = image of one attempt, or null to clear it. Saved (image + activity, one transaction) before the in-memory state changes. */
+    /* ---- the correction of one character: write five, then mark five ---- */
+    _corrItem(corrId, ci, phase) {
+      const c = this.correction(corrId); if (!c || c.state !== 'open') throw new Error('Correction activity is not open');
+      const it = c.items[ci]; if (!it) throw new Error('No such character');
+      if (phase && itemPhase(it) !== phase) throw new Error('Not in the ' + phase + ' phase');
+      return { c, it, n: clone(c) };
+    }
+    _putCorr(n, image, drop) { return this.store.saveCorrection(n, image, drop).then(() => { this.corrections = this.corrections.map(x => (x.id === n.id ? n : x)); }); }
+    /* WRITING phase: store (or, with null, clear) the image of attempt slot `ai`. Marking does not exist yet, and a finished set of five can no longer be rewritten. */
     saveAttempt(corrId, ci, ai, data) {
       const imgId = data ? 'cimg-' + this.uid() : null;
       return this._serial(async () => {
-        const c = this.correction(corrId); if (!c || c.state !== 'open') throw new Error('Correction activity is not open');
-        if (!c.items[ci] || !Number.isInteger(ai) || ai < 0 || ai >= ATTEMPTS) throw new Error('No such attempt');
+        const { c, n } = this._corrItem(corrId, ci, 'write');
+        if (!Number.isInteger(ai) || ai < 0 || ai >= ATTEMPTS) throw new Error('No such attempt');
         if (data != null && !(typeof data === 'string' && /^data:image\//.test(data))) throw new Error('Invalid handwriting image');
-        const n = clone(c), old = n.items[ci].attempts[ai]; n.items[ci].attempts[ai] = imgId; n.updatedAt = this.now();
-        await this.store.saveCorrection(n, data ? { id: imgId, sid: c.id, data } : null, old);
-        this.corrections = this.corrections.map(x => (x.id === corrId ? n : x));
+        const x = n.items[ci], old = x.attempts[ai]; x.attempts[ai] = imgId; x.marks[ai] = null; n.updatedAt = this.now();
+        await this._putCorr(n, data ? { id: imgId, sid: c.id, data } : null, old);
       });
     }
-    /* One attempt at a time. `attempts` holds the CONFIRMED correct attempts of the current streak (so 0-5 = "correct attempts: n / 5");
-       `pending` is the drawing of the attempt being written (saved as the learner draws, so it survives leaving/refreshing) and `checking`
-       means it was submitted and waits for the parent's mark. An unmarked drawing never counts. */
+    /* the drawing of the attempt being written (saved while drawing, so it survives leaving or refreshing); it counts only once submitted */
     savePending(corrId, ci, data) {
       const imgId = data ? 'cimg-' + this.uid() : null;
       return this._serial(async () => {
-        const c = this.correction(corrId); if (!c || c.state !== 'open') throw new Error('Correction activity is not open');
-        const it = c.items[ci]; if (!it || attemptsDone(it)) throw new Error('No attempt to write');
-        if (it.checking) throw new Error('The submitted attempt must be marked first');
+        const { c, it, n } = this._corrItem(corrId, ci, 'write');
         if (data != null && !(typeof data === 'string' && /^data:image\//.test(data))) throw new Error('Invalid handwriting image');
-        const n = clone(c), old = it.pending || null; n.items[ci].pending = imgId; n.updatedAt = this.now();
-        await this.store.saveCorrection(n, data ? { id: imgId, sid: c.id, data } : null, old);
-        this.corrections = this.corrections.map(x => (x.id === corrId ? n : x));
+        n.items[ci].pending = imgId; n.updatedAt = this.now();
+        await this._putCorr(n, data ? { id: imgId, sid: c.id, data } : null, it.pending || null);
       });
     }
-    submitPending(corrId, ci) {
+    /* submit the pending drawing as the next attempt of the set (a blank canvas can never be submitted); the fifth one opens the marking phase */
+    submitAttempt(corrId, ci) {
       return this._serial(async () => {
-        const c = this.correction(corrId); if (!c || c.state !== 'open') throw new Error('Correction activity is not open');
-        const it = c.items[ci]; if (!it || !it.pending) throw new Error('Nothing written yet');       // a blank canvas can never be submitted
-        if (it.checking) return;
-        const n = clone(c); n.items[ci].checking = true; n.updatedAt = this.now();
-        await this.store.saveCorrection(n, null, null); this.corrections = this.corrections.map(x => (x.id === corrId ? n : x));
+        const { it, n } = this._corrItem(corrId, ci, 'write'); if (!it.pending) throw new Error('Nothing written yet');
+        const k = it.attempts.findIndex(a => !a); if (k < 0) throw new Error('The set is complete');
+        const x = n.items[ci]; x.attempts[k] = x.pending; x.marks[k] = null; x.pending = null; n.updatedAt = this.now();
+        await this._putCorr(n, null, null);
       });
     }
-    /* The parent's mark of the submitted attempt: correct = one more consecutive correct attempt; incorrect = the streak (and the drawing) is
-       discarded and counting restarts at 0. Neither touches the original exam/practice record or its score. */
-    markPending(corrId, ci, ok) {
+    /* MARKING phase (all five submitted): mark one attempt correct (true) or incorrect (false); it can be changed until the set is finished */
+    markAttempt(corrId, ci, ai, ok) {
       return this._serial(async () => {
-        const c = this.correction(corrId); if (!c || c.state !== 'open') throw new Error('Correction activity is not open');
-        const it = c.items[ci]; if (!it || !it.pending || !it.checking) throw new Error('No submitted attempt to mark');
-        const n = clone(c), x = n.items[ci], drop = [];
-        if (ok) { const k = x.attempts.findIndex(a => !a); if (k < 0) throw new Error('Already complete'); x.attempts[k] = x.pending; }
-        else { x.attempts.forEach(a => { if (a) drop.push(a); }); drop.push(x.pending); x.attempts = Array(ATTEMPTS).fill(null); }
-        x.pending = null; x.checking = false; n.updatedAt = this.now();
-        await this.store.saveCorrection(n, null, drop); this.corrections = this.corrections.map(y => (y.id === corrId ? n : y));
+        const { n } = this._corrItem(corrId, ci, 'mark');
+        if (!Number.isInteger(ai) || ai < 0 || ai >= ATTEMPTS || typeof ok !== 'boolean') throw new Error('No such attempt');
+        n.items[ci].marks[ai] = ok; n.updatedAt = this.now(); await this._putCorr(n, null, null);
+      });
+    }
+    /* Finish the marked set. All five correct: the character is done. Otherwise the consecutive-correct count is back at zero: the whole set (images
+       included) is discarded and a completely new set of five must be written. The original record and score are never touched. */
+    finishSet(corrId, ci) {
+      return this._serial(async () => {
+        const { it, n } = this._corrItem(corrId, ci, 'mark');
+        if (it.marks.some(m => m === null || m === undefined)) throw new Error('Mark all five attempts first');
+        const x = n.items[ci]; n.updatedAt = this.now();
+        if (x.marks.every(m => m === true)) { x.confirmed = true; await this._putCorr(n, null, null); return; }
+        const drop = x.attempts.filter(Boolean); if (x.pending) drop.push(x.pending);
+        x.attempts = Array(ATTEMPTS).fill(null); x.marks = Array(ATTEMPTS).fill(null); x.pending = null; x.confirmed = false; x.failed = (x.failed | 0) + 1;
+        await this._putCorr(n, null, drop);
       });
     }
     completeCorrection(corrId) {
@@ -740,7 +778,7 @@
       const sessions = (all.sessions || []).map(x => ({ ...x, items: x.items.map(inline) }));
       const drafts = (all.drafts || []).filter(d => { const x = sessions.find(y => y.id === d.sid); return x && x.kind === 'write' && x.phase === 'ask' && x.i === d.qi && x.items[x.i].cid === d.cid; });   // never export an orphan/stale draft
       const inl = a => { if (!a) return null; const data = im.get(a); if (data) return data; missing++; return null; };
-      const corrections = (all.corrections || []).slice().sort((a, b) => a.createdAt - b.createdAt).map(c => ({ ...c, items: c.items.map(it => { const pending = inl(it.pending); return { ...it, attempts: it.attempts.map(inl), pending, checking: !!(it.checking && pending) }; }) }));
+      const corrections = (all.corrections || []).map(upgradeCorrection).sort((a, b) => a.createdAt - b.createdAt).map(c => ({ ...c, items: c.items.map(it => ({ ...it, attempts: it.attempts.map(inl), pending: inl(it.pending) })) }));
       return { missingImages: missing, json: { format: 'cq-backup', version: 1, exported: new Date(this.now()).toISOString(), data: { levels: this.content ? [] : sortLevels(all.levels), records, sessions, drafts, corrections, stats } } };
     }
     /* mode: 'merge' | 'replace'. Throws ImportError (validation) before touching any data. */
@@ -780,5 +818,5 @@
     }
   }
 
-  return { Quiz, SharedContent, ADAPT, normStatsRow, applyAnswer, priority, learningStatus, weightedSample, statsFromRecords, classifyMs, ImportError, validateBackup, planMerge, splitImages, splitSessionImages, splitCorrectionImages, buildRecord, buildCorrection, correctionPosition, attemptsDone, formatDuration, durationOf, ATTEMPTS, shuf, clone };
+  return { Quiz, SharedContent, ADAPT, normStatsRow, applyAnswer, priority, learningStatus, weightedSample, statsFromRecords, classifyMs, ImportError, validateBackup, planMerge, splitImages, splitSessionImages, splitCorrectionImages, buildRecord, buildCorrection, correctionPosition, attemptsDone, itemPhase, upgradeCorrection, formatDuration, durationOf, ATTEMPTS, shuf, clone };
 });

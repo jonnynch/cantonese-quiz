@@ -64,7 +64,7 @@ test('a session awaiting marking is not ended this way; other sessions and open 
   const { st, q } = await setup(4);
   await q.startSession({ kind: 'write', levelId: 'L1', mode: 'practice' }); await writeN(q, 4); await q.setOk(0, false); await q.setOk(1, true); await q.setOk(2, true); await q.setOk(3, true);
   assert.equal((await q.endEarly()).ok, false); await q.finishMarking();
-  const corr = q.openCorrections()[0]; await q.savePending(corr.id, 0, IMG + 'p'); await q.submitPending(corr.id, 0); const before = JSON.stringify(q.correction(corr.id));
+  const corr = q.openCorrections()[0]; await q.savePending(corr.id, 0, IMG + 'p'); await q.submitAttempt(corr.id, 0); const before = JSON.stringify(q.correction(corr.id));
   await q.startSession({ kind: 'read', levelId: 'L1', mode: 'practice' }); const other = q.cur.id; await readN(q, [true]);
   await q.startSession({ kind: 'write', levelId: 'L1', mode: 'revision', parentId: 'x', chars: q.level('L1').chars.slice(0, 2) }); await q.answerWrite(IMG + 'r');
   assert.equal((await q.endEarly()).ok, true);                                                       // ends only the current session

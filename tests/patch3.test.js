@@ -81,6 +81,8 @@ test('duration: start time is kept through backup export and import; a differing
 async function finishedWrite(q, clock, marks, mode = 'practice') { return runSession(q, clock, { kind: 'write', mode, marks, startAt: 1000, endAt: 9000 }); }
 const attemptsOf = (q, id, ci) => q.correction(id).items[ci].attempts;
 async function fill(q, id, ci, tag, slots = [0, 1, 2, 3, 4]) { for (const k of slots) assert.equal((await q.saveAttempt(id, ci, k, IMG + tag + k)).ok, true); }
+/* mark all five attempts of a character correct and finish the set: the character is done */
+async function confirm(q, id, ci) { for (let k = 0; k < 5; k++) assert.equal((await q.markAttempt(id, ci, k, true)).ok, true); assert.equal((await q.finishSet(id, ci)).ok, true); }
 
 test('correction: none when every answer is correct, and never for reading practice or reading exams', async () => {
   const st = await newStore(), clock = { t: 0 }; const q = await clockQuiz(st, clock, 20);
@@ -115,36 +117,41 @@ test('correction: exactly five independent attempts per character; blank/invalid
   for (const bad of ['', 'not-an-image', 42, {}, 'javascript:alert(1)']) assert.equal((await q.saveAttempt(id, 0, 4, bad)).ok, false, String(bad));
   for (const [ci, ai] of [[5, 0], [0, 5], [0, -1], [0, 1.5]]) assert.equal((await q.saveAttempt(id, ci, ai, IMG)).ok, false);
   assert.equal(attemptsOf(q, id, 0)[4], null);
-  await fill(q, id, 0, 'a', [4]);
+  await fill(q, id, 0, 'a', [4]); assert.equal(C.itemPhase(q.correction(id).items[0]), 'mark');   // five written: marking starts, but five written attempts alone do not finish it
+  assert.equal(C.attemptsDone(q.correction(id).items[0]), false); assert.equal((await q.completeCorrection(id)).ok, false);
   const ids = attemptsOf(q, id, 0); assert.equal(new Set(ids).size, 5);                          // five different saved images
   const imgs = (await st.exportAll()).images.filter(i => i.sid === id); assert.equal(imgs.length, 5); assert.equal(new Set(imgs.map(i => i.data)).size, 5);
   assert.equal(C.attemptsDone({ attempts: ['x', 'x', 'x', 'x', 'x'] }), false);                  // one image can never count as five
   assert.equal(C.attemptsDone({ attempts: ['a', 'b', 'c', 'd'] }), false);
+  await confirm(q, id, 0);
   assert.equal((await q.completeCorrection(id)).ok, true); assert.equal(q.correction(id).state, 'done'); assert.ok(q.correction(id).completedAt);
   assert.equal((await q.saveAttempt(id, 0, 0, IMG)).ok, false);                                  // finished activities are closed
 });
 
-test('correction: clearing or rewriting one attempt leaves the other four untouched', async () => {
+test('correction: while writing, clearing or rewriting one attempt leaves the others untouched; a complete set can no longer be rewritten', async () => {
   const st = await newStore(), clock = { t: 0 }; const q = await clockQuiz(st, clock);
-  const id = q.correctionFor((await finishedWrite(q, clock, [false, true, true])).id).id; await fill(q, id, 0, 'x');
+  const id = q.correctionFor((await finishedWrite(q, clock, [false, true, true])).id).id; await fill(q, id, 0, 'x', [0, 1, 2, 3]);
   const before = attemptsOf(q, id, 0).slice(), dataOf = async i => (await st.getImage(i)).data;
   assert.equal((await q.saveAttempt(id, 0, 2, null)).ok, true);
   const after = attemptsOf(q, id, 0); assert.equal(after[2], null); [0, 1, 3, 4].forEach(k => assert.equal(after[k], before[k]));
   assert.equal(await st.getImage(before[2]), null, 'the cleared image is removed from storage');
   assert.equal(await dataOf(before[3]), IMG + 'x3');
   await q.saveAttempt(id, 0, 2, IMG + 'rewritten'); assert.equal(await dataOf(attemptsOf(q, id, 0)[2]), IMG + 'rewritten');
-  await q.saveAttempt(id, 0, 1, IMG + 'again');                                                  // rewrite replaces, never adds a sixth image
-  assert.equal((await st.exportAll()).images.filter(i => i.sid === id).length, 5);
-  assert.equal(attemptsOf(q, id, 0)[0], before[0]); assert.equal(attemptsOf(q, id, 0)[4], before[4]);
+  await q.saveAttempt(id, 0, 1, IMG + 'again');                                                  // rewrite replaces, never adds another image
+  assert.equal((await st.exportAll()).images.filter(i => i.sid === id).length, 4);
+  assert.equal(attemptsOf(q, id, 0)[0], before[0]); assert.equal(attemptsOf(q, id, 0)[3], before[3]);
+  await fill(q, id, 0, 'x', [4]); assert.equal((await q.saveAttempt(id, 0, 1, IMG + 'late')).ok, false, 'marking has started: the five are final');
+  assert.equal((await q.saveAttempt(id, 0, 1, null)).ok, false); assert.equal((await st.exportAll()).images.filter(i => i.sid === id).length, 5);
 });
 
 test('correction: several incorrect characters each need their own five attempts', async () => {
   const st = await newStore(), clock = { t: 0 }; const q = await clockQuiz(st, clock, 4);
   const id = q.correctionFor((await finishedWrite(q, clock, [false, true, false, false])).id).id;
   const c = q.correction(id); assert.equal(c.items.length, 3);
-  await fill(q, id, 0, 'p'); await fill(q, id, 1, 'q'); await fill(q, id, 2, 'r', [0, 1, 2, 3]);
+  await fill(q, id, 0, 'p'); await confirm(q, id, 0); await fill(q, id, 1, 'q'); await confirm(q, id, 1); await fill(q, id, 2, 'r', [0, 1, 2, 3]);
   assert.equal((await q.completeCorrection(id)).ok, false);                                       // 14 / 15
-  await fill(q, id, 2, 'r', [4]);
+  await fill(q, id, 2, 'r', [4]); assert.equal((await q.completeCorrection(id)).ok, false);        // written, but not marked and finished yet
+  await confirm(q, id, 2);
   const all = q.correction(id).items.flatMap(x => x.attempts); assert.equal(all.length, 15); assert.equal(new Set(all).size, 15);
   assert.equal((await q.completeCorrection(id)).ok, true);
 });
@@ -152,32 +159,32 @@ test('correction: several incorrect characters each need their own five attempts
 test('correction: progress and handwriting survive refresh and resume', async () => {
   const st = await newStore(), clock = { t: 0 }; let q = await clockQuiz(st, clock, 4);
   const id = q.correctionFor((await finishedWrite(q, clock, [false, true, false, true])).id).id;
-  await fill(q, id, 0, 'k'); await fill(q, id, 1, 'm', [0, 1]);
+  await fill(q, id, 0, 'k'); await confirm(q, id, 0); await fill(q, id, 1, 'm', [0, 1]);
   q = await clockQuiz(st, clock);                                                                  // refresh
   assert.equal(q.openCorrections().length, 1);
   const c = q.correction(id); assert.equal(c.state, 'open'); assert.equal(c.items[0].attempts.filter(Boolean).length, 5); assert.equal(c.items[1].attempts.filter(Boolean).length, 2);
   assert.equal(c.items.findIndex(x => !C.attemptsDone(x)), 1);                                      // resumes at the first unfinished character
   assert.equal((await st.getImage(c.items[1].attempts[1])).data, IMG + 'm1');
-  await fill(q, id, 1, 'm', [2, 3, 4]); assert.equal((await q.completeCorrection(id)).ok, true);
+  await fill(q, id, 1, 'm', [2, 3, 4]); await confirm(q, id, 1); assert.equal((await q.completeCorrection(id)).ok, true);
   q = await clockQuiz(st, clock); assert.equal(q.openCorrections().length, 0); assert.equal(q.correction(id).state, 'done'); assert.equal(q.correction(id).items.flatMap(x => x.attempts).filter(Boolean).length, 10);
 });
 
 test('correction: saves from several canvases at once never lose an update, and a failed save changes nothing', async () => {
   const st = await newStore(), clock = { t: 0 }; const q = await clockQuiz(st, clock);
   const id = q.correctionFor((await finishedWrite(q, clock, [false, true, true])).id).id;
-  const rs = await Promise.all([0, 1, 2, 3, 4].map(k => q.saveAttempt(id, 0, k, IMG + 'c' + k))); assert.ok(rs.every(r => r.ok));
-  assert.equal(attemptsOf(q, id, 0).filter(Boolean).length, 5);
-  assert.equal((await (await clockQuiz(st, clock)).correction(id).items[0].attempts.filter(Boolean).length), 5);
+  const rs = await Promise.all([0, 1, 2, 3].map(k => q.saveAttempt(id, 0, k, IMG + 'c' + k))); assert.ok(rs.every(r => r.ok));
+  assert.equal(attemptsOf(q, id, 0).filter(Boolean).length, 4);
+  assert.equal((await (await clockQuiz(st, clock)).correction(id).items[0].attempts.filter(Boolean).length), 4);
   let fail = true; const real = st.saveCorrection; q.store = { ...st, saveCorrection: async (...a) => { if (fail) throw new S.StorageError('write', 'full'); return real(...a); } };
-  const before = JSON.stringify(q.correction(id)); const r = await q.saveAttempt(id, 0, 0, IMG + 'new');
-  assert.equal(r.ok, false); assert.equal(JSON.stringify(q.correction(id)), before); assert.equal((await st.exportAll()).images.filter(i => i.sid === id).length, 5);
-  fail = false; assert.equal((await q.saveAttempt(id, 0, 0, IMG + 'new')).ok, true);
+  const before = JSON.stringify(q.correction(id)); const r = await q.saveAttempt(id, 0, 4, IMG + 'new');
+  assert.equal(r.ok, false); assert.equal(JSON.stringify(q.correction(id)), before); assert.equal((await st.exportAll()).images.filter(i => i.sid === id).length, 4);
+  fail = false; assert.equal((await q.saveAttempt(id, 0, 4, IMG + 'new')).ok, true);
 });
 
 test('correction: it never changes the original record, score or statistics', async () => {
   const st = await newStore(), clock = { t: 0 }; const q = await clockQuiz(st, clock);
   const rec = await finishedWrite(q, clock, [false, true, false]); const recJson = JSON.stringify(q.records), stored = JSON.stringify((await st.exportAll()).records);
-  const id = q.correctionFor(rec.id).id; await fill(q, id, 0, 'a'); await fill(q, id, 1, 'b'); await q.completeCorrection(id);
+  const id = q.correctionFor(rec.id).id; await fill(q, id, 0, 'a'); await confirm(q, id, 0); await fill(q, id, 1, 'b'); await confirm(q, id, 1); await q.completeCorrection(id);
   assert.equal(JSON.stringify(q.records), recJson); assert.equal(JSON.stringify((await st.exportAll()).records), stored);
   assert.deepEqual(q.records[0].items.map(x => x.ok), [false, true, false]); assert.equal(q.records.length, 1);
   assert.ok(q.records[0].items.every(x => !('attempts' in x)));

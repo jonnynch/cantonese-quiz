@@ -117,7 +117,8 @@ test('offline: the whole app works with no network at all (profiles, levels, rea
   for (let i = 0; i < 5; i++) { ev(dom, `setOk(${i}, ${i > 1})`); await tick(); }                              // parent marking
   ev(dom, 'finish()'); await tick(); await tick(); assert.match(main(dom), /寫五次練習（2 個字）/);
   ev(dom, `openCorrection('corr-' + res.id)`); await tick();                                                   // correction activity
-  for (let k = 0; k < 5; k++) { stroke(dom.window.document.querySelector('#cc')); await ev(dom, 'submitAttempt()'); await ev(dom, 'markAttempt(true)'); } assert.match(dom.window.document.querySelector('#cprog').textContent, /總進度 5 \/ 10/);   // one canvas at a time, each attempt marked
+  for (let k = 0; k < 5; k++) { stroke(dom.window.document.querySelector('#cc')); await ev(dom, 'submitAttempt()'); }                // write five (one canvas at a time)...
+  for (let k = 0; k < 5; k++) await ev(dom, 'markAtt(true)'); await ev(dom, 'finishSetUI()'); assert.match(dom.window.document.querySelector('#cprog').textContent, /總進度 5 \/ 10/);   // ...then mark the five and finish the set
   ev(dom, 'leaveCorr()'); await tick(); ev(dom, "go('hist')"); await tick(); assert.match(main(dom), /甲組/);
   ev(dom, "go('set')"); await tick(); assert.match(main(dom), /安裝到主畫面/);
   ev(dom, 'switchLearner()'); await tick(); assert.match(main(dom), /選擇學習者/);

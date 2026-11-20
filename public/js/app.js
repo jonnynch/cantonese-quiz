@@ -108,7 +108,7 @@ function vPick(m) {
     h += `<div class="card"><b>有未完成的${LB(s)}</b>（${esc(s.levelName)}，${prog}）<div><small>上次作答：${fd(s.updatedAt || s.started || 0)}</small></div><div class="row"><button class="b p" data-id="${esc(s.id)}" onclick="resume(this.dataset.id)">繼續</button><button class="b r" data-id="${esc(s.id)}" onclick="discard(this.dataset.id)">放棄</button></div></div>`;
   });
   Q.openCorrections().forEach(c => { const p = CQCore.correctionPosition(c);
-    h += `<div class="card"><b>有未完成的寫五次練習</b>（${esc(c.levelName)}，第 ${p.ci + 1} / ${c.items.length} 個字，第 ${Math.min(p.ai + 1, 5)} 次，${p.saved} / ${p.total}）<div><small>上次作答：${fd(c.updatedAt || c.createdAt)}</small></div><div class="row"><button class="b p" data-id="${esc(c.id)}" onclick="openCorrection(this.dataset.id)">繼續</button></div></div>`; });
+    h += `<div class="card"><b>有未完成的寫五次練習</b>（${esc(c.levelName)}，第 ${p.ci + 1} / ${c.items.length} 個字，${p.phase === 'mark' ? '評分中' : '寫第 ' + Math.min(p.ai + 1, 5) + ' 次'}，${p.saved} / ${p.total}）<div><small>上次作答：${fd(c.updatedAt || c.createdAt)}</small></div><div class="row"><button class="b p" data-id="${esc(c.id)}" onclick="openCorrection(this.dataset.id)">繼續</button></div></div>`; });
   h += Q.levels.map(L => { const n = L.chars.length, low = ex && n < 20, ok = n && !low;
     return `<div class="card"><h3>${esc(L.name)} <small>${n} 字</small></h3>${low ? '<div class="warn">需要至少 20 個字才可以考試。</div>' : ''}<div class="row"><button class="b p" ${ok ? '' : 'disabled'} onclick="start('read','${L.id}','${md}')">${lab[0]}</button><button class="b p" ${ok ? '' : 'disabled'} onclick="start('write','${L.id}','${md}')">${lab[1]}</button></div></div>`; }).join('') || '<p>請先到「級別管理」新增級別和字。</p>';
   m.innerHTML = `<h2>${ex ? '考試' : '練習'}</h2>` + h;
@@ -383,12 +383,13 @@ function dumpLegacy() {
 function openCorrection(id) {
   const c = Q.correction(id); if (!c) return;
   const i = c.items.findIndex(x => !CQCore.attemptsDone(x));
-  corrId = id; corrIdx = i < 0 ? 0 : i; corrSum = c.state === 'done'; cFeed = ''; inS = false; res = null; hideErr(); render();
+  corrId = id; corrIdx = i < 0 ? 0 : i; corrSum = c.state === 'done'; cFeed = ''; cmIdx = null; inS = false; res = null; hideErr(); render();
 }
-/* Writing correction: ONE large canvas at a time. The learner writes the character and submits it; the parent marks that attempt (the app never
-   judges handwriting itself). Correct = one more consecutive correct attempt (n / 5) and a fresh canvas; incorrect = counting restarts at 0.
-   Five consecutive correct attempts finish the character. The drawing is saved while writing, so leaving/refreshing loses nothing. */
-let cFeed = '', cBusy = false, ccv = null;
+/* Writing correction of one character, in two phases. WRITING: five separate attempts, each on its own large canvas, submitted one by one; nothing can
+   be marked yet. MARKING (only after the fifth is submitted): the five saved writings are marked one at a time (correct / incorrect, changeable), then the
+   set is finished: all five correct = the character is done; any incorrect = counting restarts at 0 and a completely new set of five is written.
+   The app never judges handwriting itself, and the original result is never touched. */
+let cFeed = '', cBusy = false, ccv = null, cmIdx = null;
 function vCorrection(m) {
   const c = Q.correction(corrId); if (!c) { corrId = null; return render(); }
   if (corrSum || c.state === 'done') {
@@ -396,28 +397,71 @@ function vCorrection(m) {
     m.innerHTML = `<h2>寫五次練習完成</h2><div class="card"><div class="line"><span>級別</span><b>${esc(c.levelName)}</b></div><div class="line"><span>字數</span><b>${n}</b></div><div class="line"><span>已完成</span><b class="g">${n * 5} / ${n * 5}</b></div></div><div class="card"><div class="han mid">${c.items.map(x => esc(x.c)).join(' ')}</div></div><div class="row"><button class="b p" onclick="leaveCorr()">返回</button></div>`;
     return;
   }
-  const it = c.items[corrIdx], n = c.items.length, streak = it.attempts.filter(Boolean).length, checking = !!(it.checking && it.pending);
-  const total = c.items.reduce((t, x) => t + x.attempts.filter(Boolean).length, 0);
-  m.innerHTML = `<div class="bar"><span id="cprog">第 ${corrIdx + 1} / ${n} 個字　總進度 ${total} / ${n * 5}</span><button class="b" onclick="leaveCorr()" aria-label="暫停並離開，進度會保留">⏸ 暫停（保留進度）</button></div><div class="stage corr1">` +
-    `<p><b>呢個字未寫正確，請連續寫五次，每次都要寫正確。</b></p>` +
-    `<div class="row"><div class="han" style="font-size:min(22vw,14vh,130px);line-height:1">${esc(it.c)}</div><div>${it.w ? `<div class="han mid">${esc(it.w)}${it.wjp ? ` <small>${esc(it.wjp)}</small>` : ''}</div>` : ''}` +
-    `<div class="row"><button class="b spk" onclick="sayC('c')" aria-label="單字發音">🔊 單字</button>${it.w ? '<button class="b spk" onclick="sayC(\'w\')" aria-label="詞語發音">🔊 詞語</button>' : ''}</div></div></div>` +
-    `<div id="cstreak" class="streak" role="status" aria-live="polite"><b>連續寫正確：${streak} / 5</b> <span aria-hidden="true">${[0, 1, 2, 3, 4].map(k => `<span class="dot ${k < streak ? 'on' : ''}"></span>`).join('')}</span></div>` +
-    `<div id="cfb" class="fb" role="status">${esc(cFeed)}</div>` +
-    `<canvas id="cc" width="600" height="600" class="${checking ? 'lock' : ''}" aria-label="寫字區"></canvas>` +
-    (checking ? `<p><b>請家長評分：這次寫得對不對？</b></p><div class="row mkrow"><button class="b r" onclick="markAttempt(false)">錯誤</button><button class="b p" onclick="markAttempt(true)">正確</button></div>`
-              : `<div class="row mkrow"><button class="b" onclick="clrAttempt()">清除</button><button class="b p" id="csub" onclick="submitAttempt()" disabled>提交檢查</button></div>`) + `</div>`;
-  initCanvas(c);
+  if (CQCore.attemptsDone(c.items[corrIdx])) { const nx = c.items.findIndex(x => !CQCore.attemptsDone(x)); if (nx < 0) { finishCorr(); return; } corrIdx = nx; cmIdx = null; }
+  const it = c.items[corrIdx], n = c.items.length, ph = CQCore.itemPhase(it), total = CQCore.correctionPosition(c).saved;
+  const head = `<div class="bar"><span id="cprog">第 ${corrIdx + 1} / ${n} 個字　總進度 ${total} / ${n * 5}</span><button class="b" onclick="leaveCorr()" aria-label="暫停並離開，進度會保留">⏸ 暫停（保留進度）</button></div>`;
+  const target = `<div class="row"><div class="han" style="font-size:min(${ph === 'write' ? '22vw,14vh,130px' : '16vw,10vh,96px'});line-height:1">${esc(it.c)}</div><div>${it.w ? `<div class="han mid">${esc(it.w)}${it.wjp ? ` <small>${esc(it.wjp)}</small>` : ''}</div>` : ''}` +
+    `<div class="row"><button class="b spk" onclick="sayC('c')" aria-label="單字發音">🔊 單字</button>${it.w ? '<button class="b spk" onclick="sayC(\'w\')" aria-label="詞語發音">🔊 詞語</button>' : ''}</div></div></div>`;
+  if (ph === 'write') {
+    const k = it.attempts.filter(Boolean).length;                                      // submitted so far; the attempt on the canvas is number k + 1
+    m.innerHTML = head + `<div class="stage corr1"><p class="phase"><b>① 寫字階段</b>　呢個字未寫正確，請連續寫五次。五次都寫完後，才會開始評分。</p>` + target +
+      `<div id="cstreak" class="streak" role="status" aria-live="polite"><b>寫字 ${k + 1} / 5</b> <span aria-hidden="true">${[0, 1, 2, 3, 4].map(j => `<span class="dot ${j < k ? 'on' : ''}"></span>`).join('')}</span></div>` +
+      `<div id="cfb" class="fb" role="status">${esc(cFeed)}</div><canvas id="cc" width="600" height="600" aria-label="寫字區"></canvas>` +
+      `<div class="row mkrow"><button class="b" onclick="clrAttempt()">清除</button><button class="b p" id="csub" onclick="submitAttempt()" disabled>提交第 ${k + 1} 次</button></div></div>`;
+    initCanvas(c); return;
+  }
+  // marking phase: the five saved writings, one at a time
+  const marks = it.marks, firstUn = marks.findIndex(x => x === null), idx = cmIdx === null ? (firstUn < 0 ? 5 : firstUn) : Math.min(Math.max(cmIdx, 0), 5);
+  const chips = `<div class="row">${marks.map((mk, j) => `<button class="b mkchip ${mk === true ? 'p' : mk === false ? 'r' : ''} ${j === idx ? 'on' : ''}" onclick="goCm(${j})" aria-label="第 ${j + 1} 次，${mk === true ? '正確' : mk === false ? '錯誤' : '未評分'}">${j + 1} ${mk === true ? '✓' : mk === false ? '✗' : '－'}</button>`).join('')}</div>`;
+  if (idx >= 5) {
+    const bad = marks.filter(x => x === false).length, un = marks.filter(x => x === null).length;
+    m.innerHTML = head + `<div class="stage corr1 mkone"><p class="phase"><b>② 評分階段</b></p>` + target + `<div class="mkprog" role="status">五次已評分：${5 - un} / 5</div>${chips}` +
+      (un ? `<p class="warn">還有 ${un} 次未評分</p><div class="row"><button class="b p" onclick="goCm(${firstUn})">去評分</button></div>`
+          : bad ? `<p class="warn"><b>有 ${bad} 次寫得不正確。</b>連續正確次數重新計算（0 / 5），需要重新寫五次，之前寫的不會重用。</p><div class="row mkrow"><button class="b" onclick="goCm(4)">修改評分</button><button class="b r" onclick="finishSetUI()">重新寫五次</button></div>`
+                : `<p class="g"><b>五次都寫得正確！</b></p><div class="row mkrow"><button class="b" onclick="goCm(4)">修改評分</button><button class="b p" onclick="finishSetUI()">完成這個字</button></div>`) +
+      `<div id="cfb" class="fb" role="status">${esc(cFeed)}</div></div>`;
+    return;
+  }
+  m.innerHTML = head + `<div class="stage corr1 mkone"><p class="phase"><b>② 評分階段</b>　逐次評分這五次寫字。</p>` + target + `<div class="mkprog" role="status">評分 ${idx + 1} / 5</div>` +
+    `<img class="mkimg" data-img="${esc(it.attempts[idx])}" alt="第 ${idx + 1} 次寫字">` +
+    `<div class="row mkrow"><button class="b r ${marks[idx] === false ? 'on' : ''}" onclick="markAtt(false)">錯誤</button><button class="b p ${marks[idx] === true ? 'on' : ''}" onclick="markAtt(true)">正確</button></div>` +
+    `<div class="row"><button class="b" ${idx ? '' : 'disabled'} onclick="goCm(${idx - 1})">上一次</button><button class="b" onclick="goCm(${idx + 1})">下一次</button></div>${chips}<div id="cfb" class="fb" role="status">${esc(cFeed)}</div></div>`;
+  hydrate(m);
+}
+function goCm(k) { cmIdx = k; cFeed = ''; render(); }
+/* mark the shown attempt, then move on (the last one shows the summary). cBusy only ignores a second tap while saving; it is released BEFORE rendering. */
+async function markAtt(ok) {
+  if (cBusy || !Q || !corrId) return;
+  const q = Q, id = corrId, ci = corrIdx, c0 = q.correction(id), it0 = c0 && c0.items[ci]; if (!it0) return;
+  const idx = cmIdx === null ? Math.max(0, it0.marks.findIndex(x => x === null)) : cmIdx; let r; cBusy = true;
+  try { r = await q.markAttempt(id, ci, idx, ok); } finally { cBusy = false; }
+  if (q !== Q || id !== corrId) return;
+  if (!r.ok) { showBar(`<b>評分沒有儲存成功。</b>（${esc(reason(r.error))}）請再評分一次。`, 'hideErr'); return; }
+  hideErr(); cFeed = ''; const marks = q.correction(id).items[ci].marks, un = marks.findIndex(x => x === null);
+  cmIdx = idx + 1 < 5 ? idx + 1 : (un < 0 ? 5 : un); render();
+}
+/* finish the marked set: all correct = the character is done (next one / the whole activity); otherwise a completely new set of five */
+async function finishSetUI() {
+  if (cBusy || !Q || !corrId) return;
+  const q = Q, id = corrId, ci = corrIdx; let r; cBusy = true;
+  try { r = await q.finishSet(id, ci); } finally { cBusy = false; }
+  if (q !== Q || id !== corrId) return;
+  if (!r.ok) { showBar(`<b>沒有儲存成功。</b>（${esc(reason(r.error))}）已寫的字都保留，請再按一次。`, 'hideErr'); return; }
+  hideErr(); cmIdx = null; const c = q.correction(id), it = c.items[ci];
+  if (!CQCore.attemptsDone(it)) { cFeed = '有寫得不正確，連續正確次數重新計算（0 / 5）。請重新寫五次。'; render(); return; }
+  const nx = c.items.findIndex(x => !CQCore.attemptsDone(x));
+  if (nx < 0) return finishCorr();
+  corrIdx = nx; cFeed = `「${it.c}」完成了！請繼續下一個字。`; render();
 }
 function sayC(k) { const c = Q.correction(corrId), it = c && c.items[corrIdx]; if (it) speak(k === 'w' ? it.w : it.c); }
 function initCanvas(c) {
   Object.values(cTimers).forEach(clearTimeout); cTimers = {}; cFail.clear();
-  const it = c.items[corrIdx], id = corrId, q = Q, st0 = store, el = $('#cc'), x = el.getContext('2d'), S = 600, locked = !!(it.checking && it.pending);
+  const it = c.items[corrIdx], id = corrId, q = Q, st0 = store, el = $('#cc'), x = el.getContext('2d'), S = 600;
   const slot = { cv: el, cx: x, dirty: false, drawing: false }; cs = [slot]; ccv = slot;
   x.lineWidth = 12; x.lineCap = x.lineJoin = 'round'; x.strokeStyle = '#111'; x.fillStyle = '#fff'; x.fillRect(0, 0, S, S);
   const pt = e => { const r = el.getBoundingClientRect(); return [(e.clientX - r.left) * S / (r.width || S), (e.clientY - r.top) * S / (r.height || S)]; };
   const enable = () => { const b = $('#csub'); if (b) b.disabled = !slot.dirty; };
-  if (!locked) {
+  {
     el.onpointerdown = e => { e.preventDefault(); el.setPointerCapture(e.pointerId); slot.drawing = true; slot.dirty = true; enable(); const [px, py] = pt(e); x.beginPath(); x.moveTo(px, py); x.lineTo(px + .01, py); x.stroke(); x.beginPath(); x.moveTo(px, py); };
     el.onpointermove = e => { if (!slot.drawing) return; e.preventDefault(); const [px, py] = pt(e); x.lineTo(px, py); x.stroke(); x.beginPath(); x.moveTo(px, py); };
     el.onpointerup = el.onpointercancel = () => { if (!slot.drawing) return; slot.drawing = false; schedPend(); };
@@ -438,29 +482,19 @@ async function savePend() {            // a blank canvas is saved as "nothing wr
 }
 function retryCorr() { savePend(); }
 async function flushCorr() { if (cTimers.p) await savePend(); }
-function clrAttempt() { const s = ccv; if (!s || s.cv.classList.contains('lock')) return; s.cx.fillStyle = '#fff'; s.cx.fillRect(0, 0, 600, 600); s.dirty = false; const b = $('#csub'); if (b) b.disabled = true; savePend(); }
-async function submitAttempt() {
+function clrAttempt() { const s = ccv; if (!s) return; s.cx.fillStyle = '#fff'; s.cx.fillRect(0, 0, 600, 600); s.dirty = false; const b = $('#csub'); if (b) b.disabled = true; savePend(); }
+async function submitAttempt() {                      // submit the drawing as the next of the five attempts (never a blank canvas)
   if (cBusy || !ccv || !ccv.dirty) return;
-  cBusy = true; const q = Q, id = corrId, ci = corrIdx;
+  const q = Q, id = corrId, ci = corrIdx; cBusy = true; let r;
   try {
     if (!(await savePend())) return;
-    const r = await q.submitPending(id, ci); if (q !== Q || id !== corrId) return;
-    if (!r.ok) { showBar(`<b>提交沒有成功。</b>（${esc(reason(r.error))}）筆跡仍然保留，請按「重試」。`, 'submitAttempt'); return; }
-    hideErr(); cFeed = ''; render();
+    r = await q.submitAttempt(id, ci);
   } finally { cBusy = false; }
-}
-async function markAttempt(ok) {
-  if (cBusy) return; cBusy = true; const q = Q, id = corrId, ci = corrIdx;
-  try {
-    const r = await q.markPending(id, ci, ok); if (q !== Q || id !== corrId) return;
-    if (!r.ok) { showBar(`<b>評分沒有儲存成功。</b>（${esc(reason(r.error))}）請按「重試」，再評分一次。`, 'hideErr'); return; }
-    hideErr(); const c = q.correction(id), it = c.items[ci], streak = it.attempts.filter(Boolean).length;
-    if (!ok) cFeed = '寫得不正確，連續正確次數重新計算（0 / 5）。請再寫一次。';
-    else if (!CQCore.attemptsDone(it)) cFeed = `正確！連續正確 ${streak} / 5，請再寫一次。`;
-    else if (ci + 1 < c.items.length) { corrIdx = ci + 1; cFeed = `「${it.c}」完成了！請繼續下一個字。`; }
-    else { cBusy = false; return finishCorr(); }
-    render();
-  } finally { cBusy = false; }
+  if (q !== Q || id !== corrId) return;
+  if (!r.ok) { showBar(`<b>提交沒有成功。</b>（${esc(reason(r.error))}）筆跡仍然保留，請按「重試」。`, 'submitAttempt'); return; }
+  hideErr(); cmIdx = null;
+  const it = q.correction(id).items[ci]; cFeed = it.attempts.every(Boolean) ? '五次都寫完了！現在逐次評分。' : '';
+  render();
 }
 async function finishCorr() {
   const q = Q, id = corrId, r = await q.completeCorrection(id); if (q !== Q) return;
@@ -469,7 +503,7 @@ async function finishCorr() {
 }
 async function leaveCorr() {
   if (!(await safeToLeave())) return;
-  silence(); corrId = null; corrSum = false; cs = []; ccv = null; cFeed = ''; hideErr(); render(); toast('進度已保留，可以稍後繼續');
+  silence(); corrId = null; corrSum = false; cs = []; ccv = null; cFeed = ''; cmIdx = null; hideErr(); render(); toast('進度已保留，可以稍後繼續');
 }
 
 /* ---------- app updates (service worker): applied only when the learner chooses AND nothing is in progress ---------- */
@@ -498,7 +532,7 @@ async function applyUpdate() {
 const ACTIVE_KEY = 'cq-active-profile';   // sessionStorage: survives a page refresh in this tab, forgotten when the tab/app is closed
 function resetLearnerState() {            // nothing of the previous learner may stay in memory or on screen
   bk = null; mkIdx = null; mkBusy = false; endBusy = false; tab = 'levels'; lid = null; rid = null; inS = false; res = null; dirty = false; drawing = false; cv = cx = null;
-  corrId = null; corrSum = false; cs = []; ccv = null; cFeed = ''; cBusy = false; Object.values(cTimers).forEach(clearTimeout); cTimers = {}; cFail.clear(); autoKey = null;
+  corrId = null; corrSum = false; cs = []; ccv = null; cFeed = ''; cmIdx = null; cBusy = false; Object.values(cTimers).forEach(clearTimeout); cTimers = {}; cFail.clear(); autoKey = null;
   silence(); if (Q) Q.qPause(); hideErr(); document.querySelectorAll('.modal').forEach(d => d.remove());
   const t = $('#toast'); if (t) t.hidden = true;
   $('#main').innerHTML = '';
