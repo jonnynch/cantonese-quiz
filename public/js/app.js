@@ -223,16 +223,18 @@ function marking(m, s) {
   m.innerHTML = bar + `<div class="stage mkone"><div class="mkprog" role="status">${mkIdx + 1} / ${n}</div>` +
     `<div class="han" style="font-size:min(26vw,16vh,150px);line-height:1.1">${esc(it.c)}</div><div class="han mid">${esc(it.w)} <small>${esc(it.wjp)}</small></div>` +
     (it.imgId ? `<img class="mkimg" data-img="${esc(it.imgId)}" alt="學習者的手寫答案">` : '<div class="warn">沒有手寫圖片</div>') +
-    `<div class="row mkrow"><button class="b r ${it.ok === false ? 'on' : ''}" onclick="markOne(false)" ${mkBusy ? 'disabled' : ''}>錯誤</button><button class="b p ${it.ok === true ? 'on' : ''}" onclick="markOne(true)" ${mkBusy ? 'disabled' : ''}>正確</button></div>` +
+    `<div class="row mkrow"><button class="b r ${it.ok === false ? 'on' : ''}" onclick="markOne(false)">錯誤</button><button class="b p ${it.ok === true ? 'on' : ''}" onclick="markOne(true)">正確</button></div>` +
     `<div class="row"><button class="b" ${mkIdx ? '' : 'disabled'} onclick="goMk(${mkIdx - 1})">上一題</button><button class="b" ${it.ok === null ? 'disabled' : ''} onclick="goMk(${mkIdx + 1})">下一題</button></div></div>`;
 }
 function goMk(k) { mkIdx = k; render(); }
-/* mark the shown answer, then go to the next one (the last one leads to the review step); a tap while saving is ignored: no double marking */
+/* mark the shown answer, then go to the next one (the last one leads to the review step). mkBusy only ignores a second tap while this answer is being
+   saved; it is released BEFORE the next question is rendered, and the rendering never depends on it, so every question starts with usable buttons. */
 async function markOne(v) {
   if (mkBusy || !Q || !Q.cur || Q.cur.phase !== 'mark') return;
-  const q = Q, k = mkIdx; mkBusy = true;
-  try { const r = await q.setOk(k, v); if (q !== Q || r.busy) return; if (!r.ok) { after(r, '評分', q); return; } hideErr(); mkIdx = k + 1; render(); }
-  finally { mkBusy = false; }
+  const q = Q, k = mkIdx; let r; mkBusy = true;
+  try { r = await q.setOk(k, v); } finally { mkBusy = false; }
+  if (q !== Q || r.busy) return; if (!r.ok) { after(r, '評分', q); return; }
+  hideErr(); mkIdx = k + 1; render();
 }
 /* End the session early: always confirmed. "繼續" (the default and the larger target) returns to the question; ending is separate from the pause button. */
 let endBusy = false;
