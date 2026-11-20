@@ -135,7 +135,7 @@ function sess(m) {
   if (s.phase === 'mark') return marking(m, s);
   const it = s.items[s.i], n = s.items.length;
   Q.qStart(s.id + ':' + s.i);                                  // response time of this question (idempotent on rerender; paused when leaving/hidden)
-  const head = `<div class="bar"><span>${s.i + 1} / ${n}</span><button class="b" onclick="leave()" aria-label="暫停並離開，進度會保留">⏸ 暫停（保留進度）</button></div>`;
+  const head = `<div class="bar"><span class="row" style="gap:14px;flex-wrap:nowrap"><button class="b endb" onclick="askEnd()" aria-label="提早結束，結束後不能再繼續">結束</button><span>${s.i + 1} / ${n}</span></span><button class="b" onclick="leave()" aria-label="暫停並離開，進度會保留">⏸ 暫停（保留進度）</button></div>`;
   if (s.kind === 'read') {
     m.innerHTML = head + `<div class="stage"><div class="big han">${esc(it.c)}</div><div class="row"><button class="b r" style="min-width:150px;min-height:72px" onclick="mark(false)">錯誤</button><button class="b p" style="min-width:150px;min-height:72px" onclick="mark(true)">正確</button></div></div>`; return;
   }
@@ -210,7 +210,7 @@ function marking(m, s) {
   const n = s.items.length, un = s.items.filter(x => x.ok === null).length;
   if (mkIdx === null) { const f = s.items.findIndex(x => x.ok === null); mkIdx = f < 0 ? n : f; }   // (re)start at the first unmarked answer
   mkIdx = Math.min(Math.max(mkIdx, 0), n);
-  const bar = `<div class="bar"><h2>家長評分</h2><button class="b" onclick="leave()" aria-label="暫停並離開，進度會保留">⏸ 暫停（保留進度）</button></div>`;
+  const bar = `<div class="bar"><h2>家長評分</h2><button class="b" onclick="leave()" aria-label="暫停並離開，進度會保留">⏸ 暫停（保留進度）</button></div>` + (s.endedEarly ? `<p><small>已提早結束：只評分已作答的 ${n} / ${s.planned || n} 題，沒有作答的題目不會計算。</small></p>` : '');
   if (mkIdx >= n) {
     m.innerHTML = bar + `<div class="stage mkone"><div class="mkprog" role="status">${n - un} / ${n} 題已評分</div>` +
       `<div class="grid">${s.items.map((it, k) => `<button class="b mkchip ${it.ok === true ? 'p' : it.ok === false ? 'r' : ''}" onclick="goMk(${k})" aria-label="第 ${k + 1} 題，${it.ok === true ? '正確' : it.ok === false ? '錯誤' : '未評分'}"><span class="han">${esc(it.c)}</span> ${it.ok === true ? '✓' : it.ok === false ? '✗' : '－'}</button>`).join('')}</div>` +
@@ -234,6 +234,29 @@ async function markOne(v) {
   try { const r = await q.setOk(k, v); if (q !== Q || r.busy) return; if (!r.ok) { after(r, '評分', q); return; } hideErr(); mkIdx = k + 1; render(); }
   finally { mkBusy = false; }
 }
+/* End the session early: always confirmed. "繼續" (the default and the larger target) returns to the question; ending is separate from the pause button. */
+let endBusy = false;
+function askEnd() {
+  const s = Q && Q.cur; if (!s || s.phase !== 'ask' || !inS || document.querySelector('.modal')) return;
+  const n = s.items.length, done = s.i, d = document.createElement('div'); d.className = 'modal'; d.setAttribute('role', 'dialog'); d.setAttribute('aria-modal', 'true'); d.setAttribute('aria-labelledby', 'endt');
+  d.innerHTML = `<div class="card" style="width:min(480px,100%)"><h3 id="endt">提早結束這次${LB(s)}？</h3><p>已完成 ${done} / ${n} 題。</p>` +
+    `<p><b>結束後，這次${LB(s)}不能再繼續。</b>沒有作答的 ${n - done} 題不會計算，也不算錯。</p>` +
+    (done ? (s.kind === 'write' ? '<p>已作答的題目會進入家長評分。</p>' : '<p>會顯示已完成題目的結果。</p>') : '<p class="warn">還沒有完成任何一題，結束後不會留下紀錄。</p>') +
+    `<p><small>只是想休息一下？請按「繼續」，再用「暫停」保留進度。</small></p><div class="row"><button class="b p" id="endno" style="flex:2;min-height:64px">繼續</button><button class="b r" id="endyes" style="flex:1;min-height:64px">結束</button></div></div>`;
+  d.onkeydown = e => { if (e.key === 'Escape') d.remove(); };
+  document.body.appendChild(d); d.querySelector('#endno').onclick = () => d.remove(); d.querySelector('#endyes').onclick = () => { d.remove(); endNow(); }; d.querySelector('#endno').focus();
+}
+async function endNow() {
+  if (endBusy || !Q || !Q.cur || Q.cur.phase !== 'ask') return;
+  endBusy = true; const q = Q; silence();
+  try {
+    const r = await q.endEarly(); if (q !== Q || r.busy) return;
+    if (!r.ok) { after(r, '提早結束', q); return; }
+    mkIdx = null; dirty = false; hideErr();
+    if (!q.cur && !q.result) { inS = false; res = null; render(); toast('沒有完成任何一題，所以沒有留下紀錄'); return; }
+    after(r, '提早結束', q);                                         // reading: the result; writing: the parent marking of the answered questions
+  } finally { endBusy = false; }
+}
 async function setOk(k, v) { const q = Q; after(await q.setOk(k, v), '評分', q); }
 async function finish() { const q = Q; mkIdx = null; after(await q.finishMarking(), '評分結果', q); }
 function agg(rs) { let t = 0, o = 0; rs.forEach(r => r.items.forEach(x => { t++; if (x.ok) o++; })); return { t, o, p: t ? Math.round(o / t * 100) : 0 }; }
@@ -245,7 +268,7 @@ function corrButton(r) {
 }
 function result(m) {
   const r = res, a = agg([r]), bad = r.items.filter(x => !x.ok);
-  m.innerHTML = `<h2>${LB(r)}結果</h2><div class="card"><div class="line"><span>級別</span><b>${esc(r.levelName)}</b></div><div class="line"><span>類型</span><b>${LB(r)}</b></div><div class="line"><span>用時</span><b>${durText(r)}</b></div><div class="line"><span>題數</span><b>${a.t}</b></div><div class="line"><span>正確</span><b class="g">${a.o}</b></div><div class="line"><span>錯誤</span><b class="rd">${a.t - a.o}</b></div><div class="line"><span>準確率</span><b>${a.p}%</b></div></div>` +
+  m.innerHTML = `<h2>${LB(r)}結果</h2><div class="card"><div class="line"><span>級別</span><b>${esc(r.levelName)}</b></div><div class="line"><span>類型</span><b>${LB(r)}</b></div><div class="line"><span>用時</span><b>${durText(r)}</b></div><div class="line"><span>題數</span><b>${a.t}</b></div>${r.endedEarly ? `<div class="line"><span>完成</span><b>${a.t} / ${r.planned || a.t} 題（提早結束）</b></div>` : ''}<div class="line"><span>正確</span><b class="g">${a.o}</b></div><div class="line"><span>錯誤</span><b class="rd">${a.t - a.o}</b></div><div class="line"><span>準確率</span><b>${a.p}%</b></div></div>` +
     (bad.length ? `<div class="card"><h3>錯誤的字</h3><div class="han mid">${bad.map(x => esc(x.c)).join(' ')}</div></div>` : '<p class="g"><b>全部正確！</b></p>') +
     examSummary(r) +
     `<div class="row">${corrButton(r)}${bad.length ? `<button class="b p" onclick="revise()">重新溫習</button>` : ''}<button class="b" onclick="go('${r.mode === 'exam' ? 'exam' : 'practice'}')">返回</button></div>`;
@@ -270,7 +293,7 @@ async function revise() {
 /* ---------- history ---------- */
 function vHist(m) {
   if (rid) { const r = Q.records.find(x => x.id === rid); if (r) {
-    m.innerHTML = `<button class="b" onclick="rid=null;render()">返回</button><h2>${LB(r)}・${esc(r.levelName)}</h2><p>${fd(r.date)}　用時 ${durText(r)}${r.parentId ? '（溫習）' : ''}</p><div class="grid">` + r.items.map(x => `<div class="card"><div class="han mid">${esc(x.c)}</div><div>${esc(x.w)}</div><b class="${x.ok ? 'g' : 'rd'}">${x.ok ? '正確' : '錯誤'}</b>${x.imgId ? `<img data-img="${esc(x.imgId)}" alt="">` : ''}</div>`).join('') + '</div>'; return; } }
+    m.innerHTML = `<button class="b" onclick="rid=null;render()">返回</button><h2>${LB(r)}・${esc(r.levelName)}</h2><p>${fd(r.date)}　用時 ${durText(r)}${r.parentId ? '（溫習）' : ''}${r.endedEarly ? `（提早結束：${r.items.length} / ${r.planned || r.items.length} 題）` : ''}</p><div class="grid">` + r.items.map(x => `<div class="card"><div class="han mid">${esc(x.c)}</div><div>${esc(x.w)}</div><b class="${x.ok ? 'g' : 'rd'}">${x.ok ? '正確' : '錯誤'}</b>${x.imgId ? `<img data-img="${esc(x.imgId)}" alt="">` : ''}</div>`).join('') + '</div>'; return; } }
   const ids = [...new Set([...Q.levels.map(l => l.id), ...Q.records.map(r => r.levelId)])];
   m.innerHTML = '<h2>學習紀錄</h2>' + (ids.map(id => {
     const rs = Q.records.filter(r => r.levelId === id), nm = lv(id) ? lv(id).name : (rs[0] ? rs[0].levelName : '');
@@ -278,7 +301,7 @@ function vHist(m) {
       return `<div class="card"><h4>${k === 'read' ? '讀字' : '寫字'}　${a.t ? a.o + ' / ' + a.t + '（' + a.p + '%）' : '未有紀錄'}</h4>` +
         ['practice', 'revision', 'exam'].map(md => { const x = kr.filter(r => r.mode === md), g = agg(x); return `<div class="line"><span>${NAME[k][md]}</span><span>${x.length} 次　${g.t ? g.p + '%' : '—'}</span></div>`; }).join('') +
         (f.length ? `<p>常錯：${f.map(([c, n]) => `<span class="han">${esc(c)}</span>×${n}`).join('　')}</p>` : '') + '</div>'; }).join('');
-    const list = rs.slice().reverse().slice(0, 10).map(r => { const a = agg([r]); return `<button class="b line" onclick="rid='${r.id}';render()"><span>${fd(r.date)}　${LB(r)}</span><span>${a.o}/${a.t}（${a.p}%）</span></button>`; }).join('');
+    const list = rs.slice().reverse().slice(0, 10).map(r => { const a = agg([r]); return `<button class="b line" onclick="rid='${r.id}';render()"><span>${fd(r.date)}　${LB(r)}${r.endedEarly ? '・提早結束' : ''}</span><span>${a.o}/${a.t}（${a.p}%）</span></button>`; }).join('');
     return `<h3>${esc(nm)}</h3><div class="grid">${blocks}</div>${list ? `<div class="card">${list}</div>` : ''}`; }).join('') || '<p>還沒有紀錄。</p>');
 }
 /* ---------- settings: backup ---------- */
@@ -472,7 +495,7 @@ async function applyUpdate() {
 /* ---------- learners: picking, switching, managing ---------- */
 const ACTIVE_KEY = 'cq-active-profile';   // sessionStorage: survives a page refresh in this tab, forgotten when the tab/app is closed
 function resetLearnerState() {            // nothing of the previous learner may stay in memory or on screen
-  bk = null; mkIdx = null; mkBusy = false; tab = 'levels'; lid = null; rid = null; inS = false; res = null; dirty = false; drawing = false; cv = cx = null;
+  bk = null; mkIdx = null; mkBusy = false; endBusy = false; tab = 'levels'; lid = null; rid = null; inS = false; res = null; dirty = false; drawing = false; cv = cx = null;
   corrId = null; corrSum = false; cs = []; ccv = null; cFeed = ''; cBusy = false; Object.values(cTimers).forEach(clearTimeout); cTimers = {}; cFail.clear(); autoKey = null;
   silence(); if (Q) Q.qPause(); hideErr(); document.querySelectorAll('.modal').forEach(d => d.remove());
   const t = $('#toast'); if (t) t.hidden = true;

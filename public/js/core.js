@@ -63,6 +63,7 @@
       if (!Number.isFinite(r.date)) return add(at + '的日期不正確');
       if (!optStr(r.levelName) || !optStr(r.parentId)) return add(at + '的欄位格式不正確');
       if (!Array.isArray(r.items)) return add(at + '的題目列表格式不正確');
+      if ((r.endedEarly != null && typeof r.endedEarly !== 'boolean') || (r.planned != null && !Number.isInteger(r.planned))) return add(at + '的提早結束資料不正確');
       const items = []; let ok = true;
       r.items.forEach((x, k) => {
         const it = at + '第 ' + (k + 1) + ' 題';
@@ -73,7 +74,8 @@
         items.push({ cid: x.cid, c: x.c, jp: str(x.jp), w: str(x.w), wjp: str(x.wjp), ok: x.ok, img: x.img || null });
       });
       if (ok) records.push({ id: r.id, levelId: r.levelId, levelName: str(r.levelName), kind: r.kind, mode: r.mode,
-        parentId: r.parentId || null, ...(Number.isFinite(r.started) ? { started: r.started } : {}), date: r.date, items });
+        parentId: r.parentId || null, ...(Number.isFinite(r.started) ? { started: r.started } : {}), date: r.date,
+        ...(r.endedEarly === true ? { endedEarly: true, planned: Number.isInteger(r.planned) && r.planned >= items.length ? r.planned : items.length } : {}), items });
     });
     /* Optional (added after the first backups were made; an older backup simply has none of them): unfinished sessions,
        their handwriting drafts and writing-correction activities. Same version number: no separate format. */
@@ -94,6 +96,7 @@
       if (!['ask', 'mark'].includes(x.phase) || (x.kind === 'read' && x.phase !== 'ask')) return add(at + '的進度狀態不正確');
       if (!Array.isArray(x.items) || !x.items.length) return add(at + '的題目列表格式不正確');
       if (!Number.isInteger(x.i) || x.i < 0 || x.i >= x.items.length) return add(at + '的目前題號不正確');
+      if ((x.endedEarly != null && typeof x.endedEarly !== 'boolean') || (x.planned != null && !Number.isInteger(x.planned))) return add(at + '的提早結束資料不正確');
       const items = []; let ok = true;
       x.items.forEach((it, k) => {
         const lab = at + '第 ' + (k + 1) + ' 題';
@@ -105,7 +108,8 @@
         items.push({ cid: it.cid, c: it.c, jp: str(it.jp), w: str(it.w), wjp: str(it.wjp), ok: it.ok, img: it.img || null, ...(Number.isFinite(it.ms) && it.ms >= 0 ? { ms: it.ms } : {}) });
       });
       if (ok) sessions.push({ id: x.id, levelId: x.levelId, levelName: str(x.levelName), kind: x.kind, mode: x.mode, parentId: x.parentId || null,
-        ...(Number.isFinite(x.started) ? { started: x.started } : {}), ...(Number.isFinite(x.updatedAt) ? { updatedAt: x.updatedAt } : {}), i: x.i, phase: x.phase, items });
+        ...(Number.isFinite(x.started) ? { started: x.started } : {}), ...(Number.isFinite(x.updatedAt) ? { updatedAt: x.updatedAt } : {}),
+        ...(x.endedEarly === true ? { endedEarly: true, planned: Number.isInteger(x.planned) && x.planned >= x.items.length ? x.planned : x.items.length } : {}), i: x.i, phase: x.phase, items });
     });
     if (provided.drafts && !Array.isArray(d.drafts)) add('手寫草稿的列表格式不正確');
     else (d.drafts || []).forEach((x, i) => {
@@ -417,6 +421,7 @@
   function buildRecord(s, now) {
     return { id: s.id, levelId: s.levelId, levelName: s.levelName || '', kind: s.kind, mode: s.mode, parentId: s.parentId || null,
       ...(Number.isFinite(s.started) ? { started: s.started } : {}), date: now,   // started = real session start, date = completion time
+      ...(s.endedEarly ? { endedEarly: true, planned: s.planned } : {}),      // ended early: only the answered questions are in `items`; `planned` = how many were set
       items: s.items.map(({ cid, c, jp, w, wjp, ok, imgId }) => ({ cid, c, jp, w, wjp, ok, imgId: imgId || null })) };   // (response times are not part of the record: they only feed the statistics) started is the ORIGINAL start: pausing/resuming never resets it
   }
 
@@ -622,6 +627,24 @@
       await this.store.completeSession(rec, corr, [...rows.values()]);   // record + statistics + (optional) correction written and session removed atomically
       rows.forEach((r, k) => this.stats.set(k, r)); this._q = null;
       this.records.push(rec); if (corr) this.corrections.push(corr); this._dropDraft(); this.sessions = this.sessions.filter(x => x.id !== s.id); this.cur = null; this.result = rec;
+    }
+    /* End the current question session early. The answered questions are finalised; the unanswered ones are dropped and NEVER counted as wrong.
+       Reading: the result is created at once (same completion path as a finished session). Writing: the answered answers go to the usual parent
+       marking and the result is created when marking is finished. Nothing answered: there is nothing to record, so the session is just removed.
+       A session that already awaits marking has no unanswered question and is not ended this way. Ending is final: it can never be resumed as a question session. */
+    endEarly() {
+      return this._act(async () => {
+        const s = this.cur; if (!s || s.phase !== 'ask') throw new Error('No question session to end');
+        if (!s.i) {
+          await this.store.discardSession(s.id);
+          this._dropDraft(); this.sessions = this.sessions.filter(x => x.id !== s.id); this.cur = null; this.result = null; this._q = null; return;
+        }
+        const n = clone(s); n.planned = s.items.length; n.endedEarly = true; n.items = n.items.slice(0, s.i); n.updatedAt = this.now();
+        if (s.kind === 'read') { await this._complete(n); return; }
+        n.phase = 'mark'; n.i = 0;
+        await this.store.saveSession(n);                                   // also removes this session's unsubmitted drawing
+        this._dropDraft(); this._putSession(n); this._q = null;
+      });
     }
     /* Discarding is always an explicit, confirmed action on ONE session (default: the current one); other sessions are untouched. */
     discard(confirm, id) {
