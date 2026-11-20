@@ -113,8 +113,8 @@
       },
       putStats(rows) { return run(db, ['stats'], 'readwrite', (sx) => { rows.forEach(x => sx.put(x)); }); },
       /* One correction attempt: the updated activity, the new image (or none = attempt cleared) and removal of the replaced image, atomically. */
-      saveCorrection(correction, image, deleteImgId) {
-        return run(db, ['corrections', 'images'], 'readwrite', (cs, im) => { if (image) im.put(image); if (deleteImgId) im.delete(deleteImgId); cs.put(correction); });
+      saveCorrection(correction, image, deleteImgId) {      // deleteImgId: one image id or an array of ids
+        return run(db, ['corrections', 'images'], 'readwrite', (cs, im) => { if (image) im.put(image); [].concat(deleteImgId || []).forEach(id => im.delete(id)); cs.put(correction); });
       },
       discardSession(sid) {
         return run(db, ['unfinished', 'drafts', 'images'], 'readwrite', (un, dr, im) => {
