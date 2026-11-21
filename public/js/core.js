@@ -39,6 +39,7 @@
       lvIds.add(l.id);
       if (!isStr(l.name) || !l.name.trim()) add(at + '沒有名稱');
       if (!optStr(l.desc)) add(at + '的說明格式不正確');
+      if (l.hidden != null && typeof l.hidden !== 'boolean') add(at + '的隱藏標記格式不正確');
       if (!Array.isArray(l.chars)) return add(at + '的字列表格式不正確');
       const chars = [];
       l.chars.forEach((c, k) => {
@@ -50,7 +51,7 @@
         if (![c.jp, c.w, c.wjp, c.m].every(optStr)) return add(cat + '的欄位格式不正確');
         chars.push({ id: c.id, c: c.c, jp: str(c.jp), w: str(c.w), wjp: str(c.wjp), m: str(c.m) });
       });
-      levels.push({ id: l.id, name: str(l.name), desc: str(l.desc), chars,
+      levels.push({ id: l.id, name: str(l.name), desc: str(l.desc), ...(l.hidden === true ? { hidden: true } : {}), chars,
         created: Number.isFinite(l.created) ? l.created : 0, modified: Number.isFinite(l.modified) ? l.modified : 0 });
     });
     d.records.forEach((r, i) => {
@@ -468,14 +469,57 @@
       items: s.items.map(({ cid, c, jp, w, wjp, ok, imgId }) => ({ cid, c, jp, w, wjp, ok, imgId: imgId || null })) };   // (response times are not part of the record: they only feed the statistics) started is the ORIGINAL start: pausing/resuming never resets it
   }
 
+  /* ---------------- Topics ---------------- */
+  const TOPIC = { LEARNED_STREAK: 2 };          // a character counts as "learned" after this many correct answers in a row (reading or writing)
+  function normTopic(x) {
+    if (!x || typeof x !== 'object' || typeof x.id !== 'string' || !x.id || typeof x.zh !== 'string' || !x.zh || !Array.isArray(x.charIds)) return null;
+    const ids = []; x.charIds.forEach(i => { if (typeof i === 'string' && i && !ids.includes(i)) ids.push(i); });
+    return { id: x.id, zh: x.zh, en: typeof x.en === 'string' ? x.en : '', icon: typeof x.icon === 'string' ? x.icon : '', ord: Number.isFinite(x.ord) ? x.ord : 0, charIds: ids };
+  }
+  const sortTopics = a => a.slice().sort((x, y) => (x.ord - y.ord) || (x.id < y.id ? -1 : 1));
+  /* learned = the learner's latest answers for this character are correct often enough; it is read from the SAME per-character statistics the
+     curriculum uses, so there is one progress record per character however it was learned */
+  const charLearned = row => !!row && [row.read, row.write].some(k => k && k.consecutiveCorrect >= TOPIC.LEARNED_STREAK);
+
   /* ---------------- Shared content ----------------
      The learning content (levels with their characters/words) is shared by every learner and exists without any learner. It is kept in memory
      here and persisted through a provider ({ loadLevels, saveLevels, mergeLevels }); every Quiz of every learner reads the same object, so a change
      is immediately visible to all of them. Changes are serialised and persisted BEFORE they are applied to memory. */
   class SharedContent {
-    constructor(provider, o) { o = o || {}; this.provider = provider; this.uid = o.uid || defaultUid; this.levels = []; this._chain = Promise.resolve(); }
+    constructor(provider, o) { o = o || {}; this.provider = provider; this.uid = o.uid || defaultUid; this.levels = []; this.topics = []; this._chain = Promise.resolve(); }
     level(id) { return this.levels.find(l => l.id === id); }
-    async load() { this.levels = sortLevels(await this.provider.loadLevels()); return this; }
+    async load() {
+      this.levels = sortLevels(await this.provider.loadLevels());
+      this.topics = this.provider.loadTopics ? sortTopics((await this.provider.loadTopics()).map(normTopic).filter(Boolean)) : [];
+      return this;
+    }
+    /* ---- topics: shared, and they only REFERENCE the shared character records (a character may be in many topics) ---- */
+    topic(id) { return this.topics.find(t => t.id === id); }
+    /* the shared character records of a topic, in the topic's order; references that no longer resolve are skipped */
+    topicChars(t) {
+      const m = new Map(); this.levels.forEach(l => l.chars.forEach(c => { if (!m.has(c.id)) m.set(c.id, c); }));
+      return (t ? t.charIds : []).map(id => m.get(id)).filter(Boolean);
+    }
+    /* Add the built-in packs that are not there yet (idempotent; run when Explore is first opened). Each entry is resolved to the shared record with the
+       same glyph (curriculum levels first, then the topic library); only an entry found nowhere is created, once, in the hidden library level. */
+    ensureTopics(T, now) {
+      return this._run(async () => {
+        const have = new Set(this.topics.map(t => t.id)), missing = T.PACKS.filter(p => !have.has(p.id)); if (!missing.length) return;
+        const byGlyph = new Map(); this.levels.forEach(l => l.chars.forEach(c => { if (!byGlyph.has(c.c)) byGlyph.set(c.c, c.id); }));
+        const add = [];
+        const rows = missing.map(p => ({ id: p.id, zh: p.zh, en: p.en, icon: p.icon, ord: p.ord, charIds: p.items.map(([c, jp, w, wjp]) => {
+          let id = byGlyph.get(c); if (!id) { id = T.libId(c); byGlyph.set(c, id); add.push({ id, c, jp, w, wjp, m: '' }); } return id; }) }));
+        if (add.length) {
+          const next = clone(this.levels), t = now === undefined ? Date.now() : now;
+          let lib = next.find(l => l.id === T.LIB_LEVEL_ID); if (!lib) { lib = { id: T.LIB_LEVEL_ID, name: T.LIB_LEVEL_NAME, desc: '', hidden: true, chars: [], created: t, modified: t }; next.push(lib); }
+          add.forEach(c => { if (!lib.chars.some(x => x.id === c.id)) lib.chars.push(c); }); lib.modified = t;
+          next.forEach((l, i) => { l.ord = i; }); await this.provider.saveLevels(next); this.levels = sortLevels(next);
+        }
+        await this.provider.putTopics(rows); this.topics = sortTopics(this.topics.concat(rows));
+      });
+    }
+    replaceTopics(rows) { return this._run(async () => { const next = rows.map(normTopic).filter(Boolean); await this.provider.saveTopics(next); this.topics = sortTopics(next); }); }
+    mergeTopics(rows) { return this._run(async () => { const have = new Set(this.topics.map(t => t.id)), add = rows.map(normTopic).filter(x => x && !have.has(x.id)); if (add.length) await this.provider.putTopics(add); this.topics = sortTopics(this.topics.concat(add)); }); }
     _run(fn) {                      // serialised; never leaves memory and storage out of step
       const r = this._chain.then(async () => { try { await fn(); return { ok: true }; } catch (error) { return { ok: false, error }; } });
       this._chain = r.then(() => { }); return r;
@@ -514,6 +558,11 @@
       this.corrections = (d.corrections || []).map(upgradeCorrection).sort((a, b) => a.createdAt - b.createdAt);
       this.stats = new Map((d.stats || []).map(normStatsRow).filter(Boolean).map(r => [r.cid, r]));   // malformed rows can never crash the app
       this.mastery = new Map((d.mastery || []).map(normMasteryRow).filter(Boolean).map(r => [r.levelId, r]));
+    }
+    /* this learner's progress in a topic: how many of its characters are learned (from the per-character statistics) */
+    topicProgress(topic) {
+      const chars = (this.content ? this.content.topicChars(topic) : []).map(c => ({ ...c, learned: charLearned(this.stats.get(c.id)) }));
+      return { total: chars.length, learned: chars.filter(c => c.learned).length, chars };
     }
     /* { status: 'notStarted' | 'learning' | 'mastered', manual } for a level of THIS learner */
     masteryOf(levelId) {
@@ -622,7 +671,7 @@
     /* Starting an exercise never touches other unfinished sessions. Only an unfinished session of the SAME level, kind, mode (and
        revision source) counts as a duplicate: it is neither replaced nor duplicated unless the caller passes a `confirm` that agrees
        to replace it; otherwise { ok:false, duplicate:true, existing:<id> } tells the UI to resume it instead. */
-    startSession({ kind, levelId, mode, chars, parentId, confirm }) {
+    startSession({ kind, levelId, mode, chars, parentId, confirm, levelName }) {
       const L = this.level(levelId);
       let cs = chars || (L ? L.chars : []);
       if (!chars && mode === 'exam') { if (cs.length < 20) return Promise.resolve({ ok: false, error: new Error('Need at least 20 characters') }); cs = this.pickExam(kind, cs, 20); }
@@ -630,7 +679,7 @@
       const dup = this.sessions.find(x => x.kind === kind && x.levelId === levelId && x.mode === mode && (x.parentId || null) === (parentId || null));
       if (dup && !(confirm && confirm('這個練習已經有未完成的進度，要放棄舊的並重新開始嗎？'))) return Promise.resolve({ ok: false, duplicate: true, existing: dup.id });
       const t = this.now();
-      const s = { id: this.uid(), levelId, levelName: L ? L.name : '', kind, mode, parentId: parentId || null, started: t, updatedAt: t, i: 0, phase: 'ask',
+      const s = { id: this.uid(), levelId, levelName: levelName || (L ? L.name : ''), kind, mode, parentId: parentId || null, started: t, updatedAt: t, i: 0, phase: 'ask',
         items: this.shuffle(cs).map(c => ({ cid: c.id, c: c.c, jp: c.jp || '', w: c.w || '', wjp: c.wjp || '', ok: null, imgId: null })) };
       return this._act(async () => {
         await this.flushDraft();                                          // the drawing of the session being left is saved first
@@ -851,5 +900,5 @@
     }
   }
 
-  return { Quiz, SharedContent, MASTERY, normMasteryRow, ADAPT, normStatsRow, applyAnswer, priority, learningStatus, weightedSample, statsFromRecords, classifyMs, ImportError, validateBackup, planMerge, splitImages, splitSessionImages, splitCorrectionImages, buildRecord, buildCorrection, correctionPosition, attemptsDone, itemPhase, upgradeCorrection, formatDuration, durationOf, ATTEMPTS, shuf, clone };
+  return { Quiz, SharedContent, TOPIC, normTopic, charLearned, MASTERY, normMasteryRow, ADAPT, normStatsRow, applyAnswer, priority, learningStatus, weightedSample, statsFromRecords, classifyMs, ImportError, validateBackup, planMerge, splitImages, splitSessionImages, splitCorrectionImages, buildRecord, buildCorrection, correctionPosition, attemptsDone, itemPhase, upgradeCorrection, formatDuration, durationOf, ATTEMPTS, shuf, clone };
 });

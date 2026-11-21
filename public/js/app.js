@@ -34,10 +34,10 @@ async function retrySave() { const q = Q; if (q.busy) return; after(await q.retr
 const AV = a => (CQProfiles.AVATAR_EMOJI[a] || '🙂');
 function render() {
   if (!Q) { $('#nav').innerHTML = ''; ({ manage: vManage, content: vLevels, backup: vBackup }[pview] || vPickProfile)($('#main')); return; }
-  $('#nav').innerHTML = `<button class="who" onclick="switchLearner()" aria-label="切換學習者"><span class="av1">${AV(profile.avatar)}</span> ${esc(profile.name)} <small>切換學習者</small></button>` + [['levels', '級別管理'], ['practice', '練習'], ['exam', '考試'], ['hist', '學習紀錄'], ['set', '設定']].map(([k, t]) => `<button class="${tab === k && !inS ? 'on' : ''}" onclick="go('${k}')">${t}</button>`).join('');
+  $('#nav').innerHTML = `<button class="who" onclick="switchLearner()" aria-label="切換學習者"><span class="av1">${AV(profile.avatar)}</span> ${esc(profile.name)} <small>切換學習者</small></button>` + [['levels', '級別管理'], ['practice', '練習'], ['exam', '考試'], ['topics', '探索'], ['hist', '學習紀錄'], ['set', '設定']].map(([k, t]) => `<button class="${tab === k && !inS ? 'on' : ''}" onclick="${k === 'topics' ? 'tid=null;' : ''}go('${k}')">${t}</button>`).join('');
   const m = $('#main'); if (corrId) { vCorrection(m); return; }
   if (inS) { sess(m); hydrate(m); return; }
-  ({ levels: vLevels, practice: vPick, exam: vPick, hist: vHist, set: vSet, backup: vBackup })[tab](m); hydrate(m);
+  ({ levels: vLevels, practice: vPick, exam: vPick, topics: vTopics, hist: vHist, set: vSet, backup: vBackup })[tab](m); hydrate(m);
 }
 function hydrate(root) {
   const st0 = store;
@@ -80,7 +80,7 @@ function vLevels(m) {
       L.chars.map(c => `<div class="card"><div class="han mid">${esc(c.c)}</div><div>${esc(c.jp)}</div><div>${esc(c.w)} <small>${esc(c.wjp)}</small></div><div><small>${esc(c.m)}</small></div><div class="row"><button class="b" onclick="charForm('${c.id}')">編輯</button><button class="b r" onclick="delChar('${c.id}')">刪除</button></div></div>`).join('') + '</div>' + (L.chars.length ? '' : '<p>這個級別還沒有字。</p>'); return;
   }
   m.innerHTML = `<div class="row">${Q ? '' : `<button class="b" onclick="pview='pick';render()">返回</button>`}<h2 style="margin:0">級別管理</h2><button class="b p" onclick="addLevel()">新增級別</button></div><p><small>學習內容由所有學習者共用，修改後每位學習者都會看到。</small></p>` +
-    ((Q || CT).levels.map(L => `<div class="card"><h3>${esc(L.name)} <small>${L.chars.length} 字</small></h3>${L.desc ? `<p>${esc(L.desc)}</p>` : ''}<div class="row"><button class="b p" onclick="lid='${L.id}';render()">查看</button><button class="b" onclick="renLevel('${L.id}')">重新命名</button><button class="b r" onclick="delLevel('${L.id}')">刪除</button></div></div>`).join('') || '<p>還沒有級別，請先新增。</p>');
+    ((Q || CT).levels.map(L => `<div class="card"><h3>${esc(L.name)} <small>${L.chars.length} 字</small>${L.hidden ? ' <small>（主題用的字庫，不在練習和考試的級別列表中）</small>' : ''}</h3>${L.desc ? `<p>${esc(L.desc)}</p>` : ''}<div class="row"><button class="b p" onclick="lid='${L.id}';render()">查看</button><button class="b" onclick="renLevel('${L.id}')">重新命名</button><button class="b r" onclick="delLevel('${L.id}')">刪除</button></div></div>`).join('') || '<p>還沒有級別，請先新增。</p>');
 }
 function addLevel() { form('新增級別', [['name', '名稱'], ['desc', '說明（可選）']], {}, o => { if (!o.name) return false; const t = Date.now(); return commitLevels(ls => ls.push({ id: UID(), name: o.name, desc: o.desc, chars: [], created: t, modified: t })); }) }
 function renLevel(id) { const L = lv(id); form('重新命名', [['name', '名稱'], ['desc', '說明（可選）']], L, o => { if (!o.name) return false; return commitLevels(ls => { const x = ls.find(l => l.id === id); x.name = o.name; x.desc = o.desc; x.modified = Date.now(); }); }) }
@@ -110,7 +110,7 @@ function vPick(m) {
   Q.openCorrections().forEach(c => { const p = CQCore.correctionPosition(c);
     h += `<div class="card"><b>有未完成的寫五次練習</b>（${esc(c.levelName)}，第 ${p.ci + 1} / ${c.items.length} 個字，${p.phase === 'mark' ? '評分中' : '寫第 ' + Math.min(p.ai + 1, 5) + ' 次'}，${p.saved} / ${p.total}）<div><small>上次作答：${fd(c.updatedAt || c.createdAt)}</small></div><div class="row"><button class="b p" data-id="${esc(c.id)}" onclick="openCorrection(this.dataset.id)">繼續</button></div></div>`; });
   /* every level can always be started, whatever its mastery status: mastery is only this learner's own label (never a lock or a reward) */
-  h += Q.levels.map(L => { const n = L.chars.length, low = ex && n < 20, ok = n && !low, ms = Q.masteryOf(L.id).status;
+  h += Q.levels.filter(L => !L.hidden).map(L => { const n = L.chars.length, low = ex && n < 20, ok = n && !low, ms = Q.masteryOf(L.id).status;
     return `<div class="card lvl ${ms}"><h3>${esc(L.name)} <small>${n} 字</small> <span class="mst ${ms}" role="status">${MS[ms][0]} ${MS[ms][1]}</span></h3>${low ? '<div class="warn">需要至少 20 個字才可以考試。</div>' : ''}<div class="row"><button class="b p" ${ok ? '' : 'disabled'} onclick="start('read','${L.id}','${md}')">${lab[0]}</button><button class="b p" ${ok ? '' : 'disabled'} onclick="start('write','${L.id}','${md}')">${lab[1]}</button></div>` +
       `<div class="seg" role="group" aria-label="${esc(L.name)} 的掌握狀態">${['notStarted', 'learning', 'mastered'].map(s => `<button class="b seg-b ${ms === s ? 'on' : ''}" aria-pressed="${ms === s}" data-lid="${esc(L.id)}" onclick="setMastery(this.dataset.lid, '${s}')">${MS[s][0]} ${MS[s][1]}</button>`).join('')}</div></div>`; }).join('') || '<p>請先到「級別管理」新增級別和字。</p>';
   m.innerHTML = `<h2>${ex ? '考試' : '練習'}</h2>` + h;
@@ -135,6 +135,41 @@ async function start(kind, levelId, mode) {
   if (q !== Q || r.busy) return;
   if (r.duplicate) { toast('這個練習已有未完成的進度，繼續上次的進度'); return resume(r.existing); }   // never a second copy, never a silent discard
   if (!r.ok) { alert('無法開始測驗（' + (reason(r.error) || r.error.message) + '）。'); return; }
+  inS = true; res = null; dirty = false; render(); autoSpeak();
+}
+/* ---------- topics (Explore): free exploration; no level has to be finished or mastered first ---------- */
+let tid = null, tOnly = false, topicsTried = false, topicsErr = null;
+function vTopics(m) {
+  if (!topicsTried) {                           // the built-in packs are added to the shared content the first time (idempotent, instant afterwards)
+    topicsTried = true; topicsErr = null; m.innerHTML = '<p>載入主題…</p>';
+    CT.ensureTopics(CQTopics).then(r => { if (!r.ok) topicsErr = r.error; if (Q && tab === 'topics' && !inS && !corrId) render(); }); return;
+  }
+  if (!CT.topics.length) { m.innerHTML = `<h2>探索主題</h2><p class="warn">${topicsErr ? '主題載入失敗（' + esc(reason(topicsErr)) + '）。' : '暫時沒有主題。'}</p><div class="row"><button class="b p" onclick="topicsTried=false;render()">重試</button></div>`; return; }
+  const t = tid && CT.topic(tid); if (t) return vTopic(m, t);
+  tid = null;
+  m.innerHTML = `<h2>探索主題</h2><p><small>想學甚麼就選甚麼，不需要先完成任何級別。</small></p><div class="grid topics">` + CT.topics.map(t => {
+    const p = Q.topicProgress(t), pct = p.total ? Math.round(p.learned * 100 / p.total) : 0;
+    return `<button class="card topic" data-tid="${esc(t.id)}" onclick="openTopic(this.dataset.tid)" aria-label="${esc(t.zh)} ${esc(t.en)}，${p.total} 個字，已學會 ${p.learned} / ${p.total}"><div class="ticon" aria-hidden="true">${esc(t.icon)}</div><h3>${esc(t.zh)} <small>${esc(t.en)}</small></h3><div>${p.total} 個字</div><div class="tbar" aria-hidden="true"><i style="width:${pct}%"></i></div><div class="tprog">${p.learned} / ${p.total} 學會${p.total && p.learned === p.total ? ' 🎉' : ''}</div></button>`; }).join('') + '</div>';
+}
+function openTopic(id) { tid = id; tOnly = false; render(); }
+function vTopic(m, t) {
+  const p = Q.topicProgress(t), un = p.chars.filter(c => !c.learned), done = p.total > 0 && !un.length;
+  m.innerHTML = `<div class="row"><button class="b" onclick="tid=null;render()">返回主題</button><h2 style="margin:0">${esc(t.icon)} ${esc(t.zh)} <small>${esc(t.en)}</small></h2></div>` +
+    `<p><b>${p.learned} / ${p.total} 學會</b>${done ? '　🎉 全部學會了！隨時可以再練習。' : '　按一下字可以聽發音。'}</p>` +
+    `<div class="grid">${p.chars.map(c => `<button class="card tchar ${c.learned ? 'learned' : ''}" data-c="${esc(c.id)}" onclick="sayChar(this.dataset.c)" aria-label="${esc(c.c)}，${c.learned ? '已學會' : '未學會'}，按一下聽發音"><div class="han big">${esc(c.c)}</div><div>${esc(c.w)}</div><small>${esc(c.jp)}</small>${c.learned ? ' <span class="g" aria-hidden="true">✓</span>' : ''}</button>`).join('')}</div>` +
+    (!done && un.length < p.total ? `<label class="line"><input type="checkbox" ${tOnly ? 'checked' : ''} onchange="tOnly=this.checked;render()" style="width:auto;min-height:0"> <span>只練未學會的字（${un.length} 個）</span></label>` : '') +
+    `<div class="row"><button class="b p" ${p.total ? '' : 'disabled'} onclick="startTopic('read')">${done ? '再練習・讀字' : '讀字練習'}</button><button class="b p" ${p.total ? '' : 'disabled'} onclick="startTopic('write')">${done ? '再練習・寫字' : '聽音寫字'}</button></div>`;
+}
+function sayChar(cid) { const t = tid && CT.topic(tid), c = t && Q.topicProgress(t).chars.find(x => x.id === cid); if (c) { unlockSpeech(); speak(autoText(c)); } }
+/* A topic practice is the ordinary practice engine on the topic's shared characters: same questions, marking, results and per-character statistics. */
+async function startTopic(kind) {
+  unlockSpeech(); const t = tid && CT.topic(tid); if (!t) return;
+  const q = Q; let cs = q.topicProgress(t).chars; if (tOnly) { const un = cs.filter(c => !c.learned); if (un.length) cs = un; }
+  if (!cs.length) { toast('這個主題暫時沒有字'); return; }
+  const r = await q.startSession({ kind, levelId: 'topic:' + t.id, levelName: '主題：' + t.zh, mode: 'practice', chars: cs.map(({ id, c, jp, w, wjp }) => ({ id, c, jp, w, wjp })) });
+  if (q !== Q || r.busy) return;
+  if (r.duplicate) { toast('這個練習已有未完成的進度，繼續上次的進度'); return resume(r.existing); }
+  if (!r.ok) { alert('無法開始練習（' + (reason(r.error) || r.error.message) + '）。'); return; }
   inS = true; res = null; dirty = false; render(); autoSpeak();
 }
 /* ---------- session ---------- */
@@ -282,7 +317,7 @@ function result(m) {
   m.innerHTML = `<h2>${LB(r)}結果</h2><div class="card"><div class="line"><span>級別</span><b>${esc(r.levelName)}</b></div><div class="line"><span>類型</span><b>${LB(r)}</b></div><div class="line"><span>用時</span><b>${durText(r)}</b></div><div class="line"><span>題數</span><b>${a.t}</b></div>${r.endedEarly ? `<div class="line"><span>完成</span><b>${a.t} / ${r.planned || a.t} 題（提早結束）</b></div>` : ''}<div class="line"><span>正確</span><b class="g">${a.o}</b></div><div class="line"><span>錯誤</span><b class="rd">${a.t - a.o}</b></div><div class="line"><span>準確率</span><b>${a.p}%</b></div></div>` +
     (bad.length ? `<div class="card"><h3>錯誤的字</h3><div class="han mid">${bad.map(x => esc(x.c)).join(' ')}</div></div>` : '<p class="g"><b>全部正確！</b></p>') +
     examSummary(r) +
-    `<div class="row">${corrButton(r)}${bad.length ? `<button class="b p" onclick="revise()">重新溫習</button>` : ''}<button class="b" onclick="go('${r.mode === 'exam' ? 'exam' : 'practice'}')">返回</button></div>`;
+    `<div class="row">${corrButton(r)}${bad.length ? `<button class="b p" onclick="revise()">重新溫習</button>` : ''}<button class="b" onclick="go('${String(r.levelId).startsWith('topic:') ? 'topics' : r.mode === 'exam' ? 'exam' : 'practice'}')">返回</button></div>`;
 }
 /* Exam only: where this exam's characters stand now (after the statistics were updated): needs more practice / improving / mastered. */
 function examSummary(r) {
@@ -295,7 +330,7 @@ function examSummary(r) {
 }
 async function revise() {
   unlockSpeech();
-  const q = Q, r = res, rr = await q.startSession({ kind: r.kind, levelId: r.levelId, mode: 'revision', parentId: r.id, chars: r.items.filter(x => !x.ok).map(x => ({ id: x.cid, c: x.c, jp: x.jp, w: x.w, wjp: x.wjp })) });
+  const q = Q, r = res, rr = await q.startSession({ kind: r.kind, levelId: r.levelId, levelName: r.levelName, mode: 'revision', parentId: r.id, chars: r.items.filter(x => !x.ok).map(x => ({ id: x.cid, c: x.c, jp: x.jp, w: x.w, wjp: x.wjp })) });
   if (q !== Q || rr.busy) return;
   if (rr.duplicate) { toast('這次溫習已有未完成的進度，繼續上次的進度'); return resume(rr.existing); }
   if (!rr.ok) { alert('無法開始溫習（' + reason(rr.error) + '）。'); return; }
@@ -305,7 +340,7 @@ async function revise() {
 function vHist(m) {
   if (rid) { const r = Q.records.find(x => x.id === rid); if (r) {
     m.innerHTML = `<button class="b" onclick="rid=null;render()">返回</button><h2>${LB(r)}・${esc(r.levelName)}</h2><p>${fd(r.date)}　用時 ${durText(r)}${r.parentId ? '（溫習）' : ''}${r.endedEarly ? `（提早結束：${r.items.length} / ${r.planned || r.items.length} 題）` : ''}</p><div class="grid">` + r.items.map(x => `<div class="card"><div class="han mid">${esc(x.c)}</div><div>${esc(x.w)}</div><b class="${x.ok ? 'g' : 'rd'}">${x.ok ? '正確' : '錯誤'}</b>${x.imgId ? `<img data-img="${esc(x.imgId)}" alt="">` : ''}</div>`).join('') + '</div>'; return; } }
-  const ids = [...new Set([...Q.levels.map(l => l.id), ...Q.records.map(r => r.levelId)])];
+  const ids = [...new Set([...Q.levels.filter(l => !l.hidden).map(l => l.id), ...Q.records.map(r => r.levelId)])];
   m.innerHTML = '<h2>學習紀錄</h2>' + (ids.map(id => {
     const rs = Q.records.filter(r => r.levelId === id), nm = lv(id) ? lv(id).name : (rs[0] ? rs[0].levelName : '');
     const blocks = ['read', 'write'].map(k => { const kr = rs.filter(r => r.kind === k), a = agg(kr), f = freq(kr);
@@ -540,7 +575,7 @@ async function applyUpdate() {
 /* ---------- learners: picking, switching, managing ---------- */
 const ACTIVE_KEY = 'cq-active-profile';   // sessionStorage: survives a page refresh in this tab, forgotten when the tab/app is closed
 function resetLearnerState() {            // nothing of the previous learner may stay in memory or on screen
-  bk = null; mkIdx = null; mkBusy = false; endBusy = false; tab = 'levels'; lid = null; rid = null; inS = false; res = null; dirty = false; drawing = false; cv = cx = null;
+  bk = null; tid = null; tOnly = false; mkIdx = null; mkBusy = false; endBusy = false; tab = 'levels'; lid = null; rid = null; inS = false; res = null; dirty = false; drawing = false; cv = cx = null;
   corrId = null; corrSum = false; cs = []; ccv = null; cFeed = ''; cmIdx = null; cBusy = false; Object.values(cTimers).forEach(clearTimeout); cTimers = {}; cFail.clear(); autoKey = null;
   silence(); if (Q) Q.qPause(); hideErr(); document.querySelectorAll('.modal').forEach(d => d.remove());
   const t = $('#toast'); if (t) t.hidden = true;

@@ -24,3 +24,13 @@ learners can never share one target. Progress is always merged (never overwrites
 3. save to the shared store, read it back and compare;
 4. only then remove the old copies from the learners and record completion. A failure leaves every original copy untouched and is retried at
    the next start; a finished migration is skipped, so running it again changes nothing.
+
+## Topic packs (Explore)
+`topics` (registry database, store `topics`) are shared content: `{ id, zh, en, icon, ord, charIds }`. A topic only REFERENCES shared character records by id,
+so a character can be in several topics and there is one record (and one set of per-learner statistics) per character. The built-in packs
+(`public/js/topics.js`) are added the first time Explore is opened (idempotent): each entry is resolved to the shared record with the same glyph (curriculum
+levels first); only an entry that exists nowhere is added, once, to the hidden shared level `topic-library` (「主題字庫」, stable ids `tc-<codepoint>`).
+The hidden level is not shown in the practice/exam/history level lists. Topic progress is derived per learner from the existing per-character statistics
+(learned = `TOPIC.LEARNED_STREAK` correct answers in a row, reading or writing); topic practice is the ordinary practice engine with `levelId = "topic:<id>"`,
+so it never counts as level history or level mastery. Topics travel in the backup's `content.topics`; a learner's topic progress travels with the learner's
+records and statistics.

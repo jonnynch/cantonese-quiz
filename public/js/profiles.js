@@ -20,11 +20,12 @@
   function openRegistryDb(idb) {
     return new Promise((resolve, reject) => {
       if (!idb) return reject(new S.StorageError('unavailable', 'IndexedDB is not available'));
-      let rq; try { rq = idb.open(REGISTRY_DB, 2); } catch (e) { return reject(S.wrap(e, 'unavailable')); }
+      let rq; try { rq = idb.open(REGISTRY_DB, 3); } catch (e) { return reject(S.wrap(e, 'unavailable')); }
       rq.onupgradeneeded = e => {
         const db = rq.result;
         if (e.oldVersion < 1) { db.createObjectStore('profiles', { keyPath: 'id' }); db.createObjectStore('meta'); }
         if (e.oldVersion < 2) db.createObjectStore('levels', { keyPath: 'id' });          // v2: the shared learning content (data only added)
+        if (e.oldVersion < 3) db.createObjectStore('topics', { keyPath: 'id' });          // v3: shared topic packs (they reference characters by id)
       };
       rq.onsuccess = () => { const db = rq.result; db.onversionchange = () => db.close(); resolve(db); };
       rq.onerror = () => reject(S.wrap(rq.error, 'unavailable'));
@@ -56,6 +57,10 @@
     get content() {
       if (!this._content) this._content = {
         loadLevels: () => S.run(this.db, ['levels'], 'readonly', (lv, out) => { lv.getAll().onsuccess = e => { out.v = e.target.result; }; }),
+        /* topics: { id, zh, en, icon, ord, charIds: [ids of shared character records] } */
+        loadTopics: () => S.run(this.db, ['topics'], 'readonly', (tp, out) => { tp.getAll().onsuccess = e => { out.v = e.target.result; }; }),
+        putTopics: rows => S.run(this.db, ['topics'], 'readwrite', (tp) => { rows.forEach(x => tp.put(x)); }),
+        saveTopics: rows => S.run(this.db, ['topics'], 'readwrite', (tp) => { tp.clear(); rows.forEach(x => tp.put(x)); }),
         /* replace the whole shared content in one transaction (levels carry their order in `ord`) */
         saveLevels: levels => S.run(this.db, ['levels'], 'readwrite', (lv) => { lv.clear(); levels.forEach((x, i) => lv.put({ ...x, ord: i })); }),
         /* merge: changed levels are written whole, new levels are appended after the existing ones */
@@ -185,7 +190,7 @@
       const chars = [], addChars = l => (l.chars || []).forEach(c => { if (c && c.id && !seenChars.has(c.id)) { seenChars.add(c.id); chars.push({ id: c.id, c: c.c, jp: c.jp || '', w: c.w || '', wjp: c.wjp || '', m: c.m || '' }); } });
       vs.forEach(v => addChars(v.l));
       const created = vs.map(v => v.l.created).filter(x => Number.isFinite(x) && x > 0);
-      out.push({ id, name: w.name, desc: w.desc || '', chars, created: created.length ? Math.min(...created) : (w.created || 0), modified: w.modified || 0 });
+      out.push({ id, name: w.name, desc: w.desc || '', ...(w.hidden ? { hidden: true } : {}), chars, created: created.length ? Math.min(...created) : (w.created || 0), modified: w.modified || 0 });
     });
     return out;
   }
