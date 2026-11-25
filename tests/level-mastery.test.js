@@ -77,7 +77,7 @@ test('a database from before mastery existed upgrades safely: nothing lost, ever
       tx.objectStore('levels').put({ ...lvl('L1', '一級', chars(2)), ord: 0 }); tx.objectStore('records').put({ id: 'r1', levelId: 'L1', levelName: '一級', kind: 'read', mode: 'practice', parentId: null, date: 5, items: [{ cid: 'c1', c: '一', ok: true, imgId: null }] });
       tx.objectStore('stats').put({ cid: 'c1', c: '一', read: {}, write: {} }); tx.oncomplete = () => { db.close(); res(); }; tx.onerror = () => rej(tx.error); };
   });
-  const st = S.createStore(await S.openDb(idb)); assert.equal(st.db.version, 5); assert.ok([...st.db.objectStoreNames].includes('mastery'));
+  const st = S.createStore(await S.openDb(idb)); assert.equal(st.db.version, 6); assert.ok([...st.db.objectStoreNames].includes('mastery')); assert.ok([...st.db.objectStoreNames].includes('stories'));
   const d = await st.loadAll(); assert.deepEqual(d.mastery, []); assert.equal(d.records.length, 1); assert.equal(d.levels.length, 1); assert.equal(d.stats.length, 1);
   const q = new C.Quiz(st); await q.init(); assert.deepEqual(q.masteryOf('L1'), { status: 'learning', manual: false }); assert.deepEqual(q.masteryOf('L2'), { status: 'notStarted', manual: false });
   await q.setMastery('L2', 'mastered'); assert.equal((await new C.Quiz(st).init(), (await st.loadAll()).mastery.length), 1);

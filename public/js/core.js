@@ -160,7 +160,11 @@
     if (d.mastery !== undefined && !Array.isArray(d.mastery)) mWarn.push('級別掌握狀態的格式不正確，已略過');
     else (d.mastery || []).forEach(x => { const r = normMasteryRow(x); if (!r || mastery.some(y => y.levelId === r.levelId)) mWarn.push('略過一筆無效的級別掌握狀態'); else mastery.push(r); });
     provided.mastery = d.mastery !== undefined && Array.isArray(d.mastery);
-    return { levels, records, sessions, drafts, corrections, stats, mastery, statWarnings: [...(statWarn.length ? [statWarn.length + ' 筆學習統計無效，已略過'] : []), ...(mWarn.length ? [mWarn.length + ' 筆級別掌握狀態無效，已略過'] : [])], provided };
+    const stories = [], syWarn = [];
+    if (d.stories !== undefined && !Array.isArray(d.stories)) syWarn.push('故事閱讀紀錄的格式不正確，已略過');
+    else (d.stories || []).forEach(x => { const r = normStory(x); if (!r || stories.some(y => y.id === r.id)) syWarn.push('略過一筆無效的故事紀錄'); else stories.push(r); });
+    provided.stories = d.stories !== undefined && Array.isArray(d.stories);
+    return { levels, records, sessions, drafts, corrections, stats, mastery, stories, statWarnings: [...(statWarn.length ? [statWarn.length + ' 筆學習統計無效，已略過'] : []), ...(mWarn.length ? [mWarn.length + ' 筆級別掌握狀態無效，已略過'] : []), ...(syWarn.length ? [syWarn.length + ' 筆故事閱讀紀錄無效，已略過'] : [])], provided };
   }
 
   /* Move inline `img` data out of record items into separate image rows (stored in IndexedDB). */
@@ -262,8 +266,8 @@
      existingImages: { imgId: dataURL } for the existing records that share an ID with an incoming one. */
   function planMerge(existing, incoming, now, existingImages) {
     const P = { newLevels: [], updatedLevels: [], newRecords: [], newSessions: [], newDrafts: [], newCorrections: [], images: [], conflicts: [], warnings: [], identical: 0, added: { levels: 0, chars: 0, records: 0, sessions: 0, corrections: 0 } };
-    existing = { ...existing, sessions: existing.sessions || [], corrections: existing.corrections || [], stats: existing.stats || [], mastery: existing.mastery || [] };
-    P.newStats = []; P.newMastery = [];
+    existing = { ...existing, sessions: existing.sessions || [], corrections: existing.corrections || [], stats: existing.stats || [], mastery: existing.mastery || [], stories: existing.stories || [] };
+    P.newStats = []; P.newMastery = []; P.newStories = [];
     incoming = { ...incoming, sessions: incoming.sessions || [], drafts: incoming.drafts || [], corrections: incoming.corrections || [] };
     const lvMap = new Map(existing.levels.map(l => [l.id, l]));
     const owner = new Map(); existing.levels.forEach(l => l.chars.forEach(c => owner.set(c.id, { lid: l.id, c })));
@@ -327,6 +331,7 @@
     const sc = splitCorrectionImages(cs2); P.newCorrections = sc.corrections; P.images.push(...sc.images); P.added.corrections = sc.corrections.length;
     { const have = new Set(existing.stats.map(x => x.cid)); P.newStats = (incoming.stats || []).filter(x => !have.has(x.cid)); }   // statistics of this device always win (never overwritten)
     { const have = new Set(existing.mastery.map(x => x.levelId)); P.newMastery = (incoming.mastery || []).filter(x => !have.has(x.levelId)); }   // this learner's own setting always wins
+    { const have = new Set(existing.stories.map(x => x.id)); P.newStories = (incoming.stories || []).filter(x => !have.has(x.id)); }   // this learner's own reading history always wins
     const noLevel = fresh.filter(r => !levelIds.has(r.levelId)).length, noParent = fresh.filter(r => r.parentId && !recIds.has(r.parentId)).length;
     if (noLevel) P.warnings.push(noLevel + ' 個紀錄所屬的級別不在資料中（紀錄仍會保留，以當時的級別名稱顯示）');
     if (noParent) P.warnings.push(noParent + ' 個溫習紀錄找不到原本的測驗紀錄（仍會保留）');
@@ -452,6 +457,39 @@
     return [...rows.values()];
   }
 
+  /* ---------------- Story reading history (per learner) ----------------
+     A read (or in-progress) story: its content as generated, plus this learner's progress on it. Kept apart from records, statistics and exams.
+     Strict shape and size limits: it comes from the database or a backup file. Returns a clean copy, or null if it is not a usable story. */
+  const STORY_LIMIT = { sentences: 20, tokens: 100, text: 600, questions: 5 };
+  function normStory(x) {
+    if (!x || typeof x !== 'object' || typeof x.id !== 'string' || !x.id) return null;
+    const txt = v => typeof v === 'string' && v.length <= STORY_LIMIT.text, int = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
+    if (!x.title || !txt(x.title.zh) || !x.title.zh || !txt(x.title.en)) return null;
+    if (!Array.isArray(x.sentences) || !x.sentences.length || x.sentences.length > STORY_LIMIT.sentences) return null;
+    const sentences = [];
+    for (const s of x.sentences) {
+      if (!s || !txt(s.zh) || !s.zh || !txt(s.en) || !Array.isArray(s.tokens) || !s.tokens.length || s.tokens.length > STORY_LIMIT.tokens) return null;
+      const tokens = [];
+      for (const t of s.tokens) { if (!Array.isArray(t) || typeof t[0] !== 'string' || !t[0] || t[0].length > 20 || (t[1] != null && typeof t[1] !== 'string') || (t[2] != null && typeof t[2] !== 'string')) return null; tokens.push([t[0], t[1] == null ? null : t[1], t[2] == null ? null : t[2], t[3] ? 1 : 0]); }
+      if (tokens.map(t => t[0]).join('') !== s.zh) return null;                    // the words must make up exactly the sentence
+      sentences.push({ zh: s.zh, en: s.en, tokens });
+    }
+    const questions = [];
+    for (const q of (Array.isArray(x.questions) ? x.questions : [])) {
+      if (!q || !['mc', 'tf'].includes(q.type) || !txt(q.zh) || !q.zh || !Array.isArray(q.options) || q.options.length < 2 || q.options.length > 4 || !q.options.every(txt) || !int(q.answer, 0, q.options.length - 1)) continue;
+      questions.push({ type: q.type, zh: q.zh, options: q.options.slice(), answer: q.answer });
+      if (questions.length >= STORY_LIMIT.questions) break;
+    }
+    let comprehension = null;
+    if (x.comprehension && int(x.comprehension.total, 1, STORY_LIMIT.questions) && int(x.comprehension.score, 0, x.comprehension.total)) comprehension = { score: x.comprehension.score, total: x.comprehension.total };
+    const ts = v => (Number.isFinite(v) && v > 0 ? v : null);
+    return { id: x.id, title: { zh: x.title.zh, en: x.title.en }, template: typeof x.template === 'string' ? x.template : '', topic: typeof x.topic === 'string' && x.topic ? x.topic : null,
+      difficulty: [1, 2, 3].includes(x.difficulty) ? x.difficulty : 1, hero: typeof x.hero === 'string' ? x.hero : null, generated: x.generated !== false,
+      familiar: Number.isFinite(x.familiar) ? Math.min(1, Math.max(0, x.familiar)) : 0, newChars: (Array.isArray(x.newChars) ? x.newChars : []).filter(c => typeof c === 'string' && c.length <= 4).slice(0, 40),
+      sentences, questions, createdAt: ts(x.createdAt) || 0, startedAt: ts(x.startedAt), completedAt: ts(x.completedAt), readMs: Number.isInteger(x.readMs) && x.readMs >= 0 ? Math.min(x.readMs, 6 * 3600000) : 0,
+      page: int(x.page, 0, STORY_LIMIT.sentences) ? x.page : 0, audioUsed: x.audioUsed === true, comprehension };
+  }
+
   /* ---------------- Level mastery (per learner) ----------------
      The learner (or parent) marks each level as not started / learning / mastered. It is stored in the LEARNER's own data, never with the shared level, and it
      is only a label: it never creates records, scores or statistics and nothing is gated by it. Without a manual status the level shows 'learning' when this
@@ -535,7 +573,7 @@
     constructor(store, o) {
       o = o || {};
       this.store = store; this.content = o.content || null; this.uid = o.uid || defaultUid; this.now = o.now || Date.now; this.shuffle = o.shuffle || shuf; this.random = o.random || Math.random;
-      this._lv = []; this.records = []; this.sessions = []; this.stats = new Map(); this.mastery = new Map(); this._q = null; this.cur = null; this.busy = false; this.retry = null; this.result = null;
+      this._lv = []; this.records = []; this.sessions = []; this.stats = new Map(); this.mastery = new Map(); this.stories = []; this._q = null; this.cur = null; this.busy = false; this.retry = null; this.result = null;
       this.draftDelay = o.draftDelay == null ? 400 : o.draftDelay;
       this.onDraftError = null; this.onDraftOk = null; this.draftError = null;
       this._pend = null; this._timer = null; this._flushing = null; this._flushRunning = false; this.closed = false; this._lastAct = Promise.resolve(); this._cq = Promise.resolve(); this.corrections = []; this._seq = Date.now() * 1000;
@@ -558,6 +596,38 @@
       this.corrections = (d.corrections || []).map(upgradeCorrection).sort((a, b) => a.createdAt - b.createdAt);
       this.stats = new Map((d.stats || []).map(normStatsRow).filter(Boolean).map(r => [r.cid, r]));   // malformed rows can never crash the app
       this.mastery = new Map((d.mastery || []).map(normMasteryRow).filter(Boolean).map(r => [r.levelId, r]));
+      this.stories = (d.stories || []).map(normStory).filter(Boolean).sort((a, b) => (b.createdAt - a.createdAt) || (a.id < b.id ? -1 : 1));   // newest first; unusable rows are ignored
+    }
+    /* ---- story reading (a separate activity: it writes no records, statistics, mastery or exam results) ---- */
+    story(id) { return this.stories.find(x => x.id === id); }
+    storyList() { return this.stories.slice(); }
+    recentStories(n) { return this.stories.slice(0, n).map(x => ({ template: x.template, hero: x.hero })); }
+    /* the characters this learner knows: learned through practice (any way, curriculum or topic) or part of a level marked mastered */
+    knownGlyphs() {
+      const known = new Set(); if (!this.content) return known;
+      this.content.levels.forEach(l => {
+        const all = !l.hidden && this.mastery.get(l.id) && this.mastery.get(l.id).status === 'mastered';
+        l.chars.forEach(c => { if (all || charLearned(this.stats.get(c.id))) known.add(c.c); });
+      });
+      return known;
+    }
+    /* change a story's reading progress. The patch (an object, or a function of the LATEST copy returning one) is applied inside the write queue, so two quick
+       updates (page, audio used, reading time, completion) can never overwrite each other with a stale copy. */
+    updateStory(id, patch) {
+      return this._serial(async () => {
+        const cur = this.story(id); if (!cur) throw new Error('No such story');
+        const next = normStory({ ...cur, ...(typeof patch === 'function' ? patch(cur) : patch) }); if (!next) throw new Error('Invalid story');
+        await this.store.saveStory(next); this.stories = this.stories.map(x => (x.id === id ? next : x));
+      });
+    }
+    /* add or update a story (its reading progress); only this story's row is written */
+    saveStory(row) {
+      return this._serial(async () => {
+        const r = normStory(row); if (!r) throw new Error('Invalid story');
+        await this.store.saveStory(r);
+        const i = this.stories.findIndex(x => x.id === r.id); if (i < 0) this.stories.push(r); else this.stories[i] = r;
+        this.stories.sort((a, b) => (b.createdAt - a.createdAt) || (a.id < b.id ? -1 : 1));
+      });
     }
     /* this learner's progress in a topic: how many of its characters are learned (from the per-character statistics) */
     topicProgress(topic) {
@@ -857,11 +927,12 @@
       const records = all.records.slice().sort((a, b) => (a.date || 0) - (b.date || 0)).map(r => ({ ...r, items: r.items.map(inline) }));
       const stats = (all.stats || []).map(normStatsRow).filter(Boolean).sort((a, b) => (a.cid < b.cid ? -1 : 1));
       const mastery = (all.mastery || []).map(normMasteryRow).filter(Boolean).sort((a, b) => (a.levelId < b.levelId ? -1 : 1));
+      const stories = (all.stories || []).map(normStory).filter(Boolean).sort((a, b) => (a.createdAt - b.createdAt) || (a.id < b.id ? -1 : 1));
       const sessions = (all.sessions || []).map(x => ({ ...x, items: x.items.map(inline) }));
       const drafts = (all.drafts || []).filter(d => { const x = sessions.find(y => y.id === d.sid); return x && x.kind === 'write' && x.phase === 'ask' && x.i === d.qi && x.items[x.i].cid === d.cid; });   // never export an orphan/stale draft
       const inl = a => { if (!a) return null; const data = im.get(a); if (data) return data; missing++; return null; };
       const corrections = (all.corrections || []).map(upgradeCorrection).sort((a, b) => a.createdAt - b.createdAt).map(c => ({ ...c, items: c.items.map(it => ({ ...it, attempts: it.attempts.map(inl), pending: inl(it.pending) })) }));
-      return { missingImages: missing, json: { format: 'cq-backup', version: 1, exported: new Date(this.now()).toISOString(), data: { levels: this.content ? [] : sortLevels(all.levels), records, sessions, drafts, corrections, stats, mastery } } };
+      return { missingImages: missing, json: { format: 'cq-backup', version: 1, exported: new Date(this.now()).toISOString(), data: { levels: this.content ? [] : sortLevels(all.levels), records, sessions, drafts, corrections, stats, mastery, stories } } };
     }
     /* mode: 'merge' | 'replace'. Throws ImportError (validation) before touching any data. */
     async importBackup(json, mode, confirm, opts) {
@@ -880,7 +951,7 @@
         if (np) warnings.push(np + ' 個溫習紀錄找不到原本的測驗紀錄（仍會保留）');
         await this.store.replaceAll({ levels: data.levels, records: sp.records, images: [...sp.images, ...ss.images, ...cc.images], sessions: ss.sessions, drafts: data.drafts,
           corrections: data.provided.corrections ? cc.corrections : undefined,
-          stats: data.provided.stats ? data.stats : statsFromRecords(sp.records), mastery: data.provided.mastery ? data.mastery : undefined });      // an older backup has none: rebuilt from its records
+          stats: data.provided.stats ? data.stats : statsFromRecords(sp.records), mastery: data.provided.mastery ? data.mastery : undefined, stories: data.provided.stories ? data.stories : undefined });      // an older backup has none: rebuilt from its records
         this.cur = null; this._set(await this.store.loadAll());
         return { mode, added: { levels: data.levels.length, chars: data.levels.reduce((n, l) => n + l.chars.length, 0), records: data.records.length, sessions: data.sessions.length, corrections: data.corrections.length }, conflicts: [], warnings, identical: 0 };
       }
@@ -890,15 +961,15 @@
       this.sessions.filter(x => inS.has(x.id)).forEach(x => x.items.forEach(it => { if (it.imgId) imgIds.push(it.imgId); }));
       this.corrections.filter(x => inC.has(x.id)).forEach(x => x.items.forEach(it => { it.attempts.forEach(a => { if (a) imgIds.push(a); }); if (it.pending) imgIds.push(it.pending); }));
       const imgs = imgIds.length ? await this.store.getImages(imgIds) : {};
-      const plan = planMerge({ levels: this.levels, records: this.records, sessions: this.sessions, corrections: this.corrections, stats: [...this.stats.values()], mastery: [...this.mastery.values()] }, data, this.now(), imgs);
+      const plan = planMerge({ levels: this.levels, records: this.records, sessions: this.sessions, corrections: this.corrections, stats: [...this.stats.values()], mastery: [...this.mastery.values()], stories: this.stories }, data, this.now(), imgs);
       const none = { levels: 0, chars: 0, records: 0, sessions: 0, corrections: 0 };
       // Any conflict stops the merge: nothing is applied, so the data is never left half-merged.
       if (plan.conflicts.length && !(opts && opts.allowPartial)) return { mode, aborted: true, added: none, conflicts: plan.conflicts, warnings: plan.warnings, identical: plan.identical };
-      await this.store.applyMerge({ newLevels: plan.newLevels, updatedLevels: plan.updatedLevels, records: plan.newRecords, images: plan.images, sessions: plan.newSessions, drafts: plan.newDrafts, corrections: plan.newCorrections, stats: plan.newStats, mastery: plan.newMastery });
+      await this.store.applyMerge({ newLevels: plan.newLevels, updatedLevels: plan.updatedLevels, records: plan.newRecords, images: plan.images, sessions: plan.newSessions, drafts: plan.newDrafts, corrections: plan.newCorrections, stats: plan.newStats, mastery: plan.newMastery, stories: plan.newStories });
       this._set(await this.store.loadAll());
       return { mode, added: plan.added, conflicts: plan.conflicts, warnings: [...data.statWarnings, ...plan.warnings], identical: plan.identical };
     }
   }
 
-  return { Quiz, SharedContent, TOPIC, normTopic, charLearned, MASTERY, normMasteryRow, ADAPT, normStatsRow, applyAnswer, priority, learningStatus, weightedSample, statsFromRecords, classifyMs, ImportError, validateBackup, planMerge, splitImages, splitSessionImages, splitCorrectionImages, buildRecord, buildCorrection, correctionPosition, attemptsDone, itemPhase, upgradeCorrection, formatDuration, durationOf, ATTEMPTS, shuf, clone };
+  return { Quiz, SharedContent, normStory, TOPIC, normTopic, charLearned, MASTERY, normMasteryRow, ADAPT, normStatsRow, applyAnswer, priority, learningStatus, weightedSample, statsFromRecords, classifyMs, ImportError, validateBackup, planMerge, splitImages, splitSessionImages, splitCorrectionImages, buildRecord, buildCorrection, correctionPosition, attemptsDone, itemPhase, upgradeCorrection, formatDuration, durationOf, ATTEMPTS, shuf, clone };
 });
