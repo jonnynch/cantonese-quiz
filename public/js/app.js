@@ -270,7 +270,7 @@ async function finishStory() {
   hideErr(); sPhase = 'done'; sSince = null; sPlaying = -1; render();
 }
 function vStoryDone(m, st) {
-  m.innerHTML = `<div class="stage"><h2>🎉 讀完了！</h2><p class="han big">${esc(st.title.zh)}</p><p>用了 ${readTime(st.readMs || 0)}</p>` +
+  m.innerHTML = `<div class="stage"><h2>🎉 讀完了！</h2><p class="han mid">${esc(st.title.zh)}</p><p>用了 ${readTime(st.readMs || 0)}</p>` +
     (st.newChars.length ? `<p>故事裏的新字：<span class="han">${st.newChars.map(esc).join(' ')}</span></p>` : '<p>故事裏的字你都認識！</p>') +
     `<div class="row">${st.questions.length ? '<button class="b p" onclick="startQuiz()">試試理解題</button>' : ''}<button class="b" data-id="${esc(st.id)}" onclick="openStory(this.dataset.id)">再讀一次</button><button class="b" onclick="storyBack()">返回故事</button></div></div>`;
 }
@@ -278,7 +278,7 @@ function vStoryDone(m, st) {
 function startQuiz() { sq = { i: 0, picked: null, correct: 0 }; sPhase = 'quiz'; render(); }
 function vStoryQuiz(m, st) {
   const q = st.questions[sq.i], n = st.questions.length, p = sq.picked;
-  m.innerHTML = `<div class="bar"><span class="pg" role="status">理解題 ${sq.i + 1} / ${n}</span></div><div class="stage"><p class="han big qtext">${esc(q.zh)}</p><button class="b spk" onclick="speak(Q.story(sid).questions[sq.i].zh)" aria-label="讀出問題">🔊</button>` +
+  m.innerHTML = `<div class="bar"><span class="pg" role="status">理解題 ${sq.i + 1} / ${n}</span></div><div class="stage"><p class="han qtext">${esc(q.zh)}</p><button class="b spk" onclick="speak(Q.story(sid).questions[sq.i].zh)" aria-label="讀出問題">🔊</button>` +
     `<div class="qopts">${q.options.map((o, i) => `<button class="b qopt ${p === null ? '' : i === q.answer ? 'right' : i === p ? 'wrong' : ''}" ${p === null ? '' : 'disabled'} onclick="pickAns(${i})">${esc(o)}</button>`).join('')}</div>` +
     (p === null ? '' : `<p class="${p === q.answer ? 'g' : 'warn'}" role="status"><b>${p === q.answer ? '答對了！👏' : '再想想！正確答案是「' + esc(q.options[q.answer]) + '」'}</b></p><div class="row"><button class="b p" onclick="nextQ()">${sq.i + 1 < n ? '下一題' : '看分數'}</button></div>`) + `</div>`;
 }
