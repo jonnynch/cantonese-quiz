@@ -4,7 +4,7 @@
   const m = factory();
   if (typeof module === 'object' && module.exports) module.exports = m; else root.CQStorage = m;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
-  const DB_NAME = 'cantonese-quiz', DB_VERSION = 4, LEGACY_KEY = 'cantonese-quiz-v1';
+  const DB_NAME = 'cantonese-quiz', DB_VERSION = 6, LEGACY_KEY = 'cantonese-quiz-v1';
 
   class StorageError extends Error {
     constructor(code, message, cause) { super(message); this.name = 'StorageError'; this.code = code; this.cause = cause; }
@@ -30,6 +30,8 @@
           db.createObjectStore('meta');
         }
         if (old < 2) db.createObjectStore('corrections', { keyPath: 'id' });   // v2: writing-correction activities (data only added, never changed)
+        if (old < 6) db.createObjectStore('stories', { keyPath: 'id' });         // v6: this learner's story reading history (stories + progress), data only added
+        if (old < 5) db.createObjectStore('mastery', { keyPath: 'levelId' });   // v5: this learner's own mastery status per level (data only added)
         if (old < 4) db.createObjectStore('stats', { keyPath: 'cid' });         // v4: per-character adaptive learning statistics (data only added)
         if (old < 3) {
           // v3: several unfinished sessions (one row per session id) and one handwriting draft per session (keyed by session id).
@@ -70,8 +72,10 @@
       db,
       /* `sessions` = every unfinished session. `session` = the most recently updated one (or null), kept for older callers. */
       loadAll() {
-        return run(db, ['levels', 'records', 'unfinished', 'corrections', 'stats'], 'readonly', (lv, rc, un, cs, sx, out) => {
+        return run(db, ['levels', 'records', 'unfinished', 'corrections', 'stats', 'mastery', 'stories'], 'readonly', (lv, rc, un, cs, sx, ms, sy, out) => {
           const o = out.v = {};
+          sy.getAll().onsuccess = e => { o.stories = e.target.result; };
+          ms.getAll().onsuccess = e => { o.mastery = e.target.result; };
           sx.getAll().onsuccess = e => { o.stats = e.target.result; };
           cs.getAll().onsuccess = e => { o.corrections = e.target.result; };
           lv.getAll().onsuccess = e => { o.levels = e.target.result; };
@@ -111,6 +115,11 @@
           (stats || []).forEach(x => sx.put(x));
         });
       },
+      /* manual mastery status of one level for THIS learner (the level itself is shared content); nothing else is touched */
+      /* story reading history of THIS learner (a story and the reading progress on it); separate from records, statistics and exams */
+      saveStory(row) { return run(db, ['stories'], 'readwrite', (sy) => { sy.put(row); }); },
+      setMastery(row) { return run(db, ['mastery'], 'readwrite', (ms) => { ms.put(row); }); },
+      deleteMastery(levelId) { return run(db, ['mastery'], 'readwrite', (ms) => { ms.delete(levelId); }); },
       putStats(rows) { return run(db, ['stats'], 'readwrite', (sx) => { rows.forEach(x => sx.put(x)); }); },
       /* One correction attempt: the updated activity, the new image (or none = attempt cleared) and removal of the replaced image, atomically. */
       saveCorrection(correction, image, deleteImgId) {      // deleteImgId: one image id or an array of ids
@@ -146,8 +155,10 @@
       /* Replace every data store in one transaction (explicit "replace all" import).
          sessions/drafts always come from the backup (an older backup has none: unfinished sessions are then cleared, as the
          confirmation says). corrections: replaced when the backup has them, otherwise the existing ones (and their images) are kept. */
-      replaceAll({ levels, records, images, sessions, drafts, corrections, stats }) {
-        return run(db, ['levels', 'records', 'images', 'sessions', 'unfinished', 'drafts', 'corrections', 'stats'], 'readwrite', (lv, rc, im, ss, un, dr, cs, sx) => {
+      replaceAll({ levels, records, images, sessions, drafts, corrections, stats, mastery, stories }) {      // mastery / stories undefined (an older backup): the learner's own are kept
+        return run(db, ['levels', 'records', 'images', 'sessions', 'unfinished', 'drafts', 'corrections', 'stats', 'mastery', 'stories'], 'readwrite', (lv, rc, im, ss, un, dr, cs, sx, ms, sy) => {
+          if (stories !== undefined) { sy.clear(); stories.forEach(x => sy.put(x)); }
+          if (mastery !== undefined) { ms.clear(); mastery.forEach(x => ms.put(x)); }
           lv.clear(); rc.clear(); ss.clear(); un.clear(); dr.clear(); sx.clear(); (stats || []).forEach(x => sx.put(x));
           levels.forEach((x, i) => lv.put({ ...x, ord: i })); records.forEach(x => rc.put(x));
           (sessions || []).forEach(x => un.put(x)); (drafts || []).forEach(x => dr.put(x));
@@ -159,8 +170,10 @@
       },
       /* Merge: updated levels are written whole; new levels are appended after the existing ones;
          records/sessions/drafts/corrections/images are only added if absent. */
-      applyMerge({ newLevels, updatedLevels, records, images, sessions, drafts, corrections, stats }) {
-        return run(db, ['levels', 'records', 'images', 'unfinished', 'drafts', 'corrections', 'stats'], 'readwrite', (lv, rc, im, un, dr, cs, sx) => {
+      applyMerge({ newLevels, updatedLevels, records, images, sessions, drafts, corrections, stats, mastery, stories }) {
+        return run(db, ['levels', 'records', 'images', 'unfinished', 'drafts', 'corrections', 'stats', 'mastery', 'stories'], 'readwrite', (lv, rc, im, un, dr, cs, sx, ms, sy) => {
+          (stories || []).forEach(x => putIfAbsent(sy, x));
+          (mastery || []).forEach(x => putIfAbsent(ms, x, x.levelId));
           (stats || []).forEach(x => putIfAbsent(sx, x, x.cid));
           updatedLevels.forEach(x => lv.put(x));
           lv.count().onsuccess = e => { newLevels.forEach((x, i) => lv.put({ ...x, ord: e.target.result + i })); };
@@ -170,8 +183,10 @@
         });
       },
       exportAll() {
-        return run(db, ['levels', 'records', 'images', 'unfinished', 'drafts', 'corrections', 'stats'], 'readonly', (lv, rc, im, un, dr, cs, sx, out) => {
+        return run(db, ['levels', 'records', 'images', 'unfinished', 'drafts', 'corrections', 'stats', 'mastery', 'stories'], 'readonly', (lv, rc, im, un, dr, cs, sx, ms, sy, out) => {
           const o = out.v = {};
+          sy.getAll().onsuccess = e => { o.stories = e.target.result; };
+          ms.getAll().onsuccess = e => { o.mastery = e.target.result; };
           sx.getAll().onsuccess = e => { o.stats = e.target.result; };
           lv.getAll().onsuccess = e => { o.levels = e.target.result; };
           rc.getAll().onsuccess = e => { o.records = e.target.result; };

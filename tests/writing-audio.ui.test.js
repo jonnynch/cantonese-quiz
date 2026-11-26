@@ -53,9 +53,10 @@ test('a normal writing question submits exactly ONE utterance: character。word�
 });
 test('the sample 左 is spoken as 左。左右嘅左 using the existing compound word', async () => {
   const idb = newIdb(), e = env(), id = await seed(idb), dom = await openPage(idb, e, id);
-  ev(dom, "start('write','L1','practice')"); await tick();
+  ev(dom, "start('write','L1','practice')"); await until(() => ev(dom, 'inS') && starts(e).length >= 1);          // the question has started and its own automatic speech has happened
+  e.log.length = 0;
   ev(dom, "Q.cur.items[0].c = '左'; Q.cur.items[0].w = '左右'; autoKey = null; autoSpeak()"); await until(() => said(e).includes('左。左右嘅左'));
-  assert.equal(said(e).at(-1), '左。左右嘅左'); assert.equal(starts(e).filter(x => x.text === '左。左右嘅左').length, 1);
+  assert.deepEqual(said(e), ['左。左右嘅左']); assert.equal(starts(e).length, 1);
   dom.window.close();
 });
 test('without a valid compound word only the target character is spoken', async () => {

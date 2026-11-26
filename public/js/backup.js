@@ -2,8 +2,9 @@
 
    {
      format: 'cq-backup', schemaVersion: 2, exportedAt: ISO,
-     content:  { levels: [ { id, name, desc, chars: [ { id, c, jp, w, wjp, m } ], created, modified } ] },   // ONCE; characters carry their word data
-     profiles: [ { profileId, profileName, avatar, data: { records, sessions, drafts, corrections, stats } } ]   // one entry per learner
+     content:  { levels: [ { id, name, desc, chars: [ { id, c, jp, w, wjp, m } ], created, modified } ],      // ONCE; characters carry their word data
+                 topics: [ { id, zh, en, icon, ord, charIds: [ ids of characters in the levels above ] } ] },   // optional; topics only reference characters
+     profiles: [ { profileId, profileName, avatar, data: { records, sessions, drafts, corrections, stats, mastery, stories } } ]   // one entry per learner
    }
 
    Either part may be absent: content only, progress only, or both; no learner is needed to export or import content.
@@ -13,7 +14,7 @@
   const m = factory((typeof module === 'object' && module.exports) ? require('./core.js') : root.CQCore, (typeof module === 'object' && module.exports) ? require('./profiles.js') : root.CQProfiles);
   if (typeof module === 'object' && module.exports) module.exports = m; else root.CQBackup = m;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (C, P) {
-  const FORMAT = 'cq-backup', SCHEMA = 2, PROGRESS_KEYS = ['records', 'sessions', 'drafts', 'corrections', 'stats'];
+  const FORMAT = 'cq-backup', SCHEMA = 2, PROGRESS_KEYS = ['records', 'sessions', 'drafts', 'corrections', 'stats', 'mastery', 'stories'];
   const isObj = x => x && typeof x === 'object' && !Array.isArray(x);
   const wrap = data => ({ format: FORMAT, version: 1, exported: '', data });
   const fail = list => { throw new C.ImportError(list); };
@@ -23,7 +24,7 @@
   async function buildExport(mgr, content, opts) {
     opts = opts || {}; await content.load();
     const out = { format: FORMAT, schemaVersion: SCHEMA, exportedAt: new Date(mgr.now()).toISOString() };
-    if (opts.includeContent !== false) out.content = { levels: content.levels.map(({ ord, ...l }) => l) };
+    if (opts.includeContent !== false) out.content = { levels: content.levels.map(({ ord, ...l }) => l), ...(content.topics.length ? { topics: content.topics.map(t => ({ ...t })) } : {}) };
     out.profiles = []; let missing = 0;
     const all = await mgr.list('all');
     for (const id of opts.profileIds || []) {
@@ -40,16 +41,32 @@
   }
 
   /* ---------------- parse + validate (nothing is changed) ---------------- */
-  function summary(v) { return { records: v.records.length, sessions: v.sessions.length, corrections: v.corrections.length, stats: v.stats.length }; }
-  const hasProgress = s => s.records || s.sessions || s.corrections || s.stats;
+  /* topics are shared content: a malformed list is rejected (like levels), never half-imported */
+  function parseTopics(list) {
+    if (!Array.isArray(list)) fail(['備份的主題格式不正確']);
+    const out = [], ids = new Set();
+    list.forEach((t, i) => {
+      const at = '第 ' + (i + 1) + ' 個主題';
+      if (!isObj(t) || typeof t.id !== 'string' || !t.id) fail([at + '沒有有效的編號']);
+      if (ids.has(t.id)) fail(['主題編號重複：' + t.id]); ids.add(t.id);
+      if (typeof t.zh !== 'string' || !t.zh.trim()) fail([at + '沒有名稱']);
+      if (!Array.isArray(t.charIds) || t.charIds.some(x => typeof x !== 'string' || !x)) fail([at + '的字列表格式不正確']);
+      if ([t.en, t.icon].some(x => x != null && typeof x !== 'string') || (t.ord != null && !Number.isFinite(t.ord))) fail([at + '的欄位格式不正確']);
+      out.push(C.normTopic(t));
+    });
+    return out;
+  }
+  function summary(v) { return { records: v.records.length, sessions: v.sessions.length, corrections: v.corrections.length, stats: v.stats.length, mastery: v.mastery.length, stories: v.stories.length }; }
+  const hasProgress = s => s.records || s.sessions || s.corrections || s.stats || s.mastery || s.stories;
   function parse(json) {
     if (!isObj(json) || json.format !== FORMAT) fail(['這不是有效的備份檔']);
     if (json.schemaVersion === 2) {
       const content = json.content === undefined || json.content === null ? null : json.content;
-      let levels = null;
+      let levels = null, topics = null;
       if (content !== null) {
         if (!isObj(content) || !Array.isArray(content.levels)) fail(['備份的學習內容格式不正確']);
         levels = C.validateBackup(wrap({ levels: content.levels, records: [] })).levels;
+        if (content.topics !== undefined && content.topics !== null) topics = parseTopics(content.topics);
       }
       if (!Array.isArray(json.profiles)) fail(['備份缺少學習者的列表']);
       const profiles = [], ids = new Set();
@@ -66,11 +83,11 @@
         profiles.push({ profileId: p.profileId, profileName: typeof p.profileName === 'string' && p.profileName.trim() ? p.profileName.trim() : at, avatar: P.AVATARS.includes(p.avatar) ? p.avatar : null,
           legacy: false, summary: summary(v), json: wrap({ ...data, levels: [] }) });
       });
-      return { schema: 2, content: levels, profiles };
+      return { schema: 2, content: levels, topics, profiles };
     }
     if (json.version === 1) {                                               // legacy: one learner's levels and progress in one file
       const v = C.validateBackup(json), s = summary(v), d = { ...json.data, levels: [] };
-      return { schema: 1, content: v.levels.length ? v.levels : null,
+      return { schema: 1, content: v.levels.length ? v.levels : null, topics: null,
         profiles: hasProgress(s) ? [{ profileId: null, profileName: null, avatar: null, legacy: true, summary: s, json: wrap(d) }] : [] };
     }
     return fail(['不支援的備份版本']);
@@ -94,15 +111,21 @@
     await content.load();
     const rep = { content: { status: 'skipped', added: { levels: 0, chars: 0 }, identical: 0, conflicts: [], warnings: [] }, profiles: [] };
 
-    if (parsed.content && mode !== 'skip') {
+    if ((parsed.content || parsed.topics) && mode !== 'skip') {
+      const nTopics = parsed.topics ? parsed.topics.length : 0, nChars = parsed.content ? parsed.content.reduce((n, l) => n + l.chars.length, 0) : 0;
       if (mode === 'replace') {
-        const r = await content.replace(parsed.content); if (!r.ok) throw r.error;
-        rep.content = { status: 'replaced', added: { levels: parsed.content.length, chars: parsed.content.reduce((n, l) => n + l.chars.length, 0) }, identical: 0, conflicts: [], warnings: [] };
+        if (parsed.content) { const r = await content.replace(parsed.content); if (!r.ok) throw r.error; }
+        if (parsed.topics) { const r = await content.replaceTopics(parsed.topics); if (!r.ok) throw r.error; }
+        rep.content = { status: 'replaced', added: { levels: parsed.content ? parsed.content.length : 0, chars: nChars, topics: nTopics }, identical: 0, conflicts: [], warnings: [] };
       } else {
-        const plan = C.planMerge({ levels: content.levels, records: [] }, { levels: parsed.content, records: [] }, mgr.now(), {});
-        if (plan.conflicts.length) { rep.content = { status: 'aborted', added: { levels: 0, chars: 0 }, identical: plan.identical, conflicts: plan.conflicts, warnings: plan.warnings }; rep.aborted = true; return rep; }
-        const r = await content.merge({ newLevels: plan.newLevels, updatedLevels: plan.updatedLevels }); if (!r.ok) throw r.error;
-        rep.content = { status: 'merged', added: { levels: plan.added.levels, chars: plan.added.chars }, identical: plan.identical, conflicts: [], warnings: plan.warnings };
+        const plan = parsed.content ? C.planMerge({ levels: content.levels, records: [] }, { levels: parsed.content, records: [] }, mgr.now(), {}) : null;
+        const clash = (parsed.topics || []).filter(t => { const e = content.topic(t.id); return e && (e.zh !== t.zh || e.charIds.join() !== t.charIds.join()); })
+          .map(t => '主題「' + t.zh + '」(' + t.id + ')與備份不同。已保留現有版本');
+        const conflicts = [...(plan ? plan.conflicts : []), ...clash];
+        if (conflicts.length) { rep.content = { status: 'aborted', added: { levels: 0, chars: 0, topics: 0 }, identical: plan ? plan.identical : 0, conflicts, warnings: plan ? plan.warnings : [] }; rep.aborted = true; return rep; }
+        if (plan) { const r = await content.merge({ newLevels: plan.newLevels, updatedLevels: plan.updatedLevels }); if (!r.ok) throw r.error; }
+        const before = content.topics.length; if (parsed.topics) { const r = await content.mergeTopics(parsed.topics); if (!r.ok) throw r.error; }
+        rep.content = { status: 'merged', added: { levels: plan ? plan.added.levels : 0, chars: plan ? plan.added.chars : 0, topics: content.topics.length - before }, identical: plan ? plan.identical : 0, conflicts: [], warnings: plan ? plan.warnings : [] };
       }
     }
 

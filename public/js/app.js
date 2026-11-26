@@ -34,10 +34,10 @@ async function retrySave() { const q = Q; if (q.busy) return; after(await q.retr
 const AV = a => (CQProfiles.AVATAR_EMOJI[a] || '🙂');
 function render() {
   if (!Q) { $('#nav').innerHTML = ''; ({ manage: vManage, content: vLevels, backup: vBackup }[pview] || vPickProfile)($('#main')); return; }
-  $('#nav').innerHTML = `<button class="who" onclick="switchLearner()" aria-label="切換學習者"><span class="av1">${AV(profile.avatar)}</span> ${esc(profile.name)} <small>切換學習者</small></button>` + [['levels', '級別管理'], ['practice', '練習'], ['exam', '考試'], ['hist', '學習紀錄'], ['set', '設定']].map(([k, t]) => `<button class="${tab === k && !inS ? 'on' : ''}" onclick="go('${k}')">${t}</button>`).join('');
+  $('#nav').innerHTML = `<button class="who" onclick="switchLearner()" aria-label="切換學習者"><span class="av1">${AV(profile.avatar)}</span> ${esc(profile.name)} <small>切換學習者</small></button>` + [['levels', '級別管理'], ['practice', '練習'], ['exam', '考試'], ['topics', '探索'], ['stories', '故事'], ['hist', '學習紀錄'], ['set', '設定']].map(([k, t]) => `<button class="${tab === k && !inS ? 'on' : ''}" onclick="${k === 'topics' ? 'tid=null;' : ''}go('${k}')">${t}</button>`).join('');
   const m = $('#main'); if (corrId) { vCorrection(m); return; }
   if (inS) { sess(m); hydrate(m); return; }
-  ({ levels: vLevels, practice: vPick, exam: vPick, hist: vHist, set: vSet, backup: vBackup })[tab](m); hydrate(m);
+  ({ levels: vLevels, practice: vPick, exam: vPick, topics: vTopics, stories: vStories, hist: vHist, set: vSet, backup: vBackup })[tab](m); hydrate(m);
 }
 function hydrate(root) {
   const st0 = store;
@@ -80,7 +80,7 @@ function vLevels(m) {
       L.chars.map(c => `<div class="card"><div class="han mid">${esc(c.c)}</div><div>${esc(c.jp)}</div><div>${esc(c.w)} <small>${esc(c.wjp)}</small></div><div><small>${esc(c.m)}</small></div><div class="row"><button class="b" onclick="charForm('${c.id}')">編輯</button><button class="b r" onclick="delChar('${c.id}')">刪除</button></div></div>`).join('') + '</div>' + (L.chars.length ? '' : '<p>這個級別還沒有字。</p>'); return;
   }
   m.innerHTML = `<div class="row">${Q ? '' : `<button class="b" onclick="pview='pick';render()">返回</button>`}<h2 style="margin:0">級別管理</h2><button class="b p" onclick="addLevel()">新增級別</button></div><p><small>學習內容由所有學習者共用，修改後每位學習者都會看到。</small></p>` +
-    ((Q || CT).levels.map(L => `<div class="card"><h3>${esc(L.name)} <small>${L.chars.length} 字</small></h3>${L.desc ? `<p>${esc(L.desc)}</p>` : ''}<div class="row"><button class="b p" onclick="lid='${L.id}';render()">查看</button><button class="b" onclick="renLevel('${L.id}')">重新命名</button><button class="b r" onclick="delLevel('${L.id}')">刪除</button></div></div>`).join('') || '<p>還沒有級別，請先新增。</p>');
+    ((Q || CT).levels.map(L => `<div class="card"><h3>${esc(L.name)} <small>${L.chars.length} 字</small>${L.hidden ? ' <small>（主題用的字庫，不在練習和考試的級別列表中）</small>' : ''}</h3>${L.desc ? `<p>${esc(L.desc)}</p>` : ''}<div class="row"><button class="b p" onclick="lid='${L.id}';render()">查看</button><button class="b" onclick="renLevel('${L.id}')">重新命名</button><button class="b r" onclick="delLevel('${L.id}')">刪除</button></div></div>`).join('') || '<p>還沒有級別，請先新增。</p>');
 }
 function addLevel() { form('新增級別', [['name', '名稱'], ['desc', '說明（可選）']], {}, o => { if (!o.name) return false; const t = Date.now(); return commitLevels(ls => ls.push({ id: UID(), name: o.name, desc: o.desc, chars: [], created: t, modified: t })); }) }
 function renLevel(id) { const L = lv(id); form('重新命名', [['name', '名稱'], ['desc', '說明（可選）']], L, o => { if (!o.name) return false; return commitLevels(ls => { const x = ls.find(l => l.id === id); x.name = o.name; x.desc = o.desc; x.modified = Date.now(); }); }) }
@@ -109,9 +109,18 @@ function vPick(m) {
   });
   Q.openCorrections().forEach(c => { const p = CQCore.correctionPosition(c);
     h += `<div class="card"><b>有未完成的寫五次練習</b>（${esc(c.levelName)}，第 ${p.ci + 1} / ${c.items.length} 個字，${p.phase === 'mark' ? '評分中' : '寫第 ' + Math.min(p.ai + 1, 5) + ' 次'}，${p.saved} / ${p.total}）<div><small>上次作答：${fd(c.updatedAt || c.createdAt)}</small></div><div class="row"><button class="b p" data-id="${esc(c.id)}" onclick="openCorrection(this.dataset.id)">繼續</button></div></div>`; });
-  h += Q.levels.map(L => { const n = L.chars.length, low = ex && n < 20, ok = n && !low;
-    return `<div class="card"><h3>${esc(L.name)} <small>${n} 字</small></h3>${low ? '<div class="warn">需要至少 20 個字才可以考試。</div>' : ''}<div class="row"><button class="b p" ${ok ? '' : 'disabled'} onclick="start('read','${L.id}','${md}')">${lab[0]}</button><button class="b p" ${ok ? '' : 'disabled'} onclick="start('write','${L.id}','${md}')">${lab[1]}</button></div></div>`; }).join('') || '<p>請先到「級別管理」新增級別和字。</p>';
+  /* every level can always be started, whatever its mastery status: mastery is only this learner's own label (never a lock or a reward) */
+  h += Q.levels.filter(L => !L.hidden).map(L => { const n = L.chars.length, low = ex && n < 20, ok = n && !low, ms = Q.masteryOf(L.id).status;
+    return `<div class="card lvl ${ms}"><h3>${esc(L.name)} <small>${n} 字</small> <span class="mst ${ms}" role="status">${MS[ms][0]} ${MS[ms][1]}</span></h3>${low ? '<div class="warn">需要至少 20 個字才可以考試。</div>' : ''}<div class="row"><button class="b p" ${ok ? '' : 'disabled'} onclick="start('read','${L.id}','${md}')">${lab[0]}</button><button class="b p" ${ok ? '' : 'disabled'} onclick="start('write','${L.id}','${md}')">${lab[1]}</button></div>` +
+      `<div class="seg" role="group" aria-label="${esc(L.name)} 的掌握狀態">${['notStarted', 'learning', 'mastered'].map(s => `<button class="b seg-b ${ms === s ? 'on' : ''}" aria-pressed="${ms === s}" data-lid="${esc(L.id)}" onclick="setMastery(this.dataset.lid, '${s}')">${MS[s][0]} ${MS[s][1]}</button>`).join('')}</div></div>`; }).join('') || '<p>請先到「級別管理」新增級別和字。</p>';
   m.innerHTML = `<h2>${ex ? '考試' : '練習'}</h2>` + h;
+}
+const MS = { notStarted: ['⚪', '未開始'], learning: ['📖', '學習中'], mastered: ['⭐', '已掌握'] };
+/* change this learner's own mastery status of a level; nothing else changes (history, scores and statistics are untouched) */
+async function setMastery(levelId, status) {
+  const q = Q, r = await q.setMastery(levelId, status); if (q !== Q || r.busy) return;
+  if (!r.ok) { showBar(`<b>掌握狀態沒有儲存成功。</b>（${esc(reason(r.error))}）`, 'hideErr'); return; }
+  hideErr(); render();
 }
 /* Continue an unfinished session (id) or, without an id, the current one. Nothing is spoken again and nothing is reset. */
 async function resume(id) {
@@ -128,6 +137,163 @@ async function start(kind, levelId, mode) {
   if (!r.ok) { alert('無法開始測驗（' + (reason(r.error) || r.error.message) + '）。'); return; }
   inS = true; res = null; dirty = false; render(); autoSpeak();
 }
+/* ---------- topics (Explore): free exploration; no level has to be finished or mastered first ---------- */
+let tid = null, tOnly = false, topicsTried = false, topicsErr = null;
+function vTopics(m) {
+  if (!topicsTried) {                           // the built-in packs are added to the shared content the first time (idempotent, instant afterwards)
+    topicsTried = true; topicsErr = null; m.innerHTML = '<p>載入主題…</p>';
+    CT.ensureTopics(CQTopics).then(r => { if (!r.ok) topicsErr = r.error; if (Q && tab === 'topics' && !inS && !corrId) render(); }); return;
+  }
+  if (!CT.topics.length) { m.innerHTML = `<h2>探索主題</h2><p class="warn">${topicsErr ? '主題載入失敗（' + esc(reason(topicsErr)) + '）。' : '暫時沒有主題。'}</p><div class="row"><button class="b p" onclick="topicsTried=false;render()">重試</button></div>`; return; }
+  const t = tid && CT.topic(tid); if (t) return vTopic(m, t);
+  tid = null;
+  m.innerHTML = `<h2>探索主題</h2><p><small>想學甚麼就選甚麼，不需要先完成任何級別。</small></p><div class="grid topics">` + CT.topics.map(t => {
+    const p = Q.topicProgress(t), pct = p.total ? Math.round(p.learned * 100 / p.total) : 0;
+    return `<button class="card topic" data-tid="${esc(t.id)}" onclick="openTopic(this.dataset.tid)" aria-label="${esc(t.zh)} ${esc(t.en)}，${p.total} 個字，已學會 ${p.learned} / ${p.total}"><div class="ticon" aria-hidden="true">${esc(t.icon)}</div><h3>${esc(t.zh)} <small>${esc(t.en)}</small></h3><div>${p.total} 個字</div><div class="tbar" aria-hidden="true"><i style="width:${pct}%"></i></div><div class="tprog">${p.learned} / ${p.total} 學會${p.total && p.learned === p.total ? ' 🎉' : ''}</div></button>`; }).join('') + '</div>';
+}
+function openTopic(id) { tid = id; tOnly = false; render(); }
+function vTopic(m, t) {
+  const p = Q.topicProgress(t), un = p.chars.filter(c => !c.learned), done = p.total > 0 && !un.length;
+  m.innerHTML = `<div class="row"><button class="b" onclick="tid=null;render()">返回主題</button><h2 style="margin:0">${esc(t.icon)} ${esc(t.zh)} <small>${esc(t.en)}</small></h2></div>` +
+    `<p><b>${p.learned} / ${p.total} 學會</b>${done ? '　🎉 全部學會了！隨時可以再練習。' : '　按一下字可以聽發音。'}</p>` +
+    `<div class="grid">${p.chars.map(c => `<button class="card tchar ${c.learned ? 'learned' : ''}" data-c="${esc(c.id)}" onclick="sayChar(this.dataset.c)" aria-label="${esc(c.c)}，${c.learned ? '已學會' : '未學會'}，按一下聽發音"><div class="han big">${esc(c.c)}</div><div>${esc(c.w)}</div><small>${esc(c.jp)}</small>${c.learned ? ' <span class="g" aria-hidden="true">✓</span>' : ''}</button>`).join('')}</div>` +
+    (!done && un.length < p.total ? `<label class="line"><input type="checkbox" ${tOnly ? 'checked' : ''} onchange="tOnly=this.checked;render()" style="width:auto;min-height:0"> <span>只練未學會的字（${un.length} 個）</span></label>` : '') +
+    `<div class="row"><button class="b p" ${p.total ? '' : 'disabled'} onclick="startTopic('read')">${done ? '再練習・讀字' : '讀字練習'}</button><button class="b p" ${p.total ? '' : 'disabled'} onclick="startTopic('write')">${done ? '再練習・寫字' : '聽音寫字'}</button></div>`;
+}
+function sayChar(cid) { const t = tid && CT.topic(tid), c = t && Q.topicProgress(t).chars.find(x => x.id === cid); if (c) { unlockSpeech(); speak(autoText(c)); } }
+/* A topic practice is the ordinary practice engine on the topic's shared characters: same questions, marking, results and per-character statistics. */
+async function startTopic(kind) {
+  unlockSpeech(); const t = tid && CT.topic(tid); if (!t) return;
+  const q = Q; let cs = q.topicProgress(t).chars; if (tOnly) { const un = cs.filter(c => !c.learned); if (un.length) cs = un; }
+  if (!cs.length) { toast('這個主題暫時沒有字'); return; }
+  const r = await q.startSession({ kind, levelId: 'topic:' + t.id, levelName: '主題：' + t.zh, mode: 'practice', chars: cs.map(({ id, c, jp, w, wjp }) => ({ id, c, jp, w, wjp })) });
+  if (q !== Q || r.busy) return;
+  if (r.duplicate) { toast('這個練習已有未完成的進度，繼續上次的進度'); return resume(r.existing); }
+  if (!r.ok) { alert('無法開始練習（' + (reason(r.error) || r.error.message) + '）。'); return; }
+  inS = true; res = null; dirty = false; render(); autoSpeak();
+}
+/* ---------- story reading: a separate reading activity (no records, statistics, mastery or exam results are written) ---------- */
+const SDIFF = { 1: '初級', 2: '中級', 3: '高級' };
+let sid = null, sPhase = 'read', sPage = 0, sShowJp = false, sShowEn = false, sSel = { diff: null, topic: null }, sBusy = false, sPlaying = -1, sChar = null, sSince = null, sq = null, sLast = null;
+const pageSize = st => (st.difficulty === 1 ? 5 : 4), storyPages = st => Math.ceil(st.sentences.length / pageSize(st));
+const topicLabel = id => { const p = CQTopics.PACKS.find(x => x.id === id); return p ? `${p.icon} ${p.zh}` : ''; };
+const readTime = ms => (ms < 60000 ? Math.max(1, Math.round(ms / 1000)) + ' 秒' : Math.round(ms / 60000) + ' 分鐘');
+/* reading time = time the story is on screen and the page visible; saved when leaving, pausing, hiding the page or finishing */
+function storyFlush() {
+  if (!sid || sSince === null || !Q) return;
+  const ms = Math.min(Date.now() - sSince, 10 * 60000); sSince = null;
+  return ms > 0 ? Q.updateStory(sid, st => (st.completedAt ? {} : { readMs: st.readMs + ms })) : undefined;
+}
+function storyResume() { const st = sid && Q && Q.story(sid); if (st && !st.completedAt && sSince === null) sSince = Date.now(); }
+function vStories(m) {
+  if (sid) return vReader(m);
+  const diff = sSel.diff || CQStory.suggestDifficulty(Q.knownGlyphs().size), done = Q.storyList().filter(x => x.completedAt).length;
+  m.innerHTML = `<h2>故事閱讀</h2><p><small>用你已經認識的字讀小故事。已讀完 ${done} 個故事。</small></p>` +
+    `<div class="card"><h3>新故事</h3><p><small>難度</small></p><div class="seg" role="group" aria-label="難度">${[1, 2, 3].map(d => `<button class="b seg-b ${diff === d ? 'on' : ''}" aria-pressed="${diff === d}" onclick="sSel.diff=${d};render()">${SDIFF[d]}</button>`).join('')}</div>` +
+    `<p><small>主題（可以不選）</small></p><div class="row chips" role="group" aria-label="主題"><button class="b chip ${sSel.topic ? '' : 'on'}" aria-pressed="${!sSel.topic}" onclick="sSel.topic=null;render()">不指定</button>` +
+    CQTopics.PACKS.map(p => `<button class="b chip ${sSel.topic === p.id ? 'on' : ''}" aria-pressed="${sSel.topic === p.id}" data-t="${esc(p.id)}" onclick="sSel.topic=this.dataset.t;render()">${esc(p.icon)} ${esc(p.zh)}</button>`).join('') + `</div>` +
+    `<div class="row"><button class="b p" id="sgen" onclick="newStory()">✨ 產生故事</button></div><div id="smsg"></div></div>` +
+    (Q.storyList().length ? `<h3>我的故事</h3>` + Q.storyList().map(st => {
+      const P = storyPages(st), status = st.completedAt ? `<span class="g">✓ 已讀完</span> ${fd(st.completedAt)}${st.comprehension ? '・理解題 ' + st.comprehension.score + ' / ' + st.comprehension.total : ''}` : st.startedAt ? `讀到第 ${Math.min(st.page + 1, P)} / ${P} 頁` : '還沒有開始';
+      return `<div class="card story"><b class="han">${esc(st.title.zh)}</b> <small>${SDIFF[st.difficulty]}${st.topic ? '・' + esc(topicLabel(st.topic)) : ''}</small><div>${status}</div><div class="row"><button class="b p" data-id="${esc(st.id)}" onclick="openStory(this.dataset.id)">${st.completedAt ? '再讀一次' : st.startedAt ? '繼續閱讀' : '開始閱讀'}</button></div></div>`; }).join('') : '');
+}
+async function newStory() {
+  if (sBusy || !Q) return; sBusy = true; const q = Q; let row;
+  try {
+    const topicId = sSel.topic, diff = sSel.diff || CQStory.suggestDifficulty(q.knownGlyphs().size);
+    if (topicId && !CT.topic(topicId)) await CT.ensureTopics(CQTopics);
+    const t = topicId && CT.topic(topicId), topic = t ? { id: t.id, chars: new Set(CT.topicChars(t).map(c => c.c)) } : null;
+    const st = CQStory.generate({ known: q.knownGlyphs(), difficulty: diff, topic, recent: q.recentStories(3) });
+    row = { id: q.uid(), ...st, createdAt: Date.now(), startedAt: null, completedAt: null, readMs: 0, page: 0, audioUsed: false, comprehension: null };
+    const r = await q.saveStory(row); if (q !== Q) return;
+    if (!r.ok) { showBar(`<b>故事沒有儲存成功。</b>（${esc(reason(r.error))}）`, 'hideErr'); return; }
+  } catch (e) { const el = $('#smsg'); if (el) el.innerHTML = '<p class="warn">暫時未能產生故事，請再試一次。</p>'; return; }
+  finally { sBusy = false; }
+  hideErr(); await openStory(row.id);
+}
+async function openStory(id) {
+  const q = Q, st = q.story(id); if (!st) return; silence();
+  sid = id; sChar = null; sPlaying = -1; sLast = null; sPage = Math.min(st.page, storyPages(st) - 1); sPhase = 'read'; sq = null;
+  if (!st.startedAt) { const r = await q.updateStory(id, s => (s.startedAt ? {} : { startedAt: Date.now() })); if (q !== Q) return; if (!r.ok) showBar(`<b>閱讀進度沒有儲存成功。</b>（${esc(reason(r.error))}）`, 'hideErr'); }
+  sSince = null; storyResume(); render();
+}
+function storyBack() { storyFlush(); silence(); sid = null; sPhase = 'read'; sPlaying = -1; sChar = null; render(); }
+function vReader(m) {
+  const st = Q.story(sid); if (!st) { sid = null; return render(); }
+  if (sPhase === 'done') return vStoryDone(m, st); if (sPhase === 'quiz') return vStoryQuiz(m, st); if (sPhase === 'score') return vStoryScore(m, st);
+  storyResume();
+  const P = storyPages(st), a = sPage * pageSize(st), last = sPage >= P - 1, nw = new Set(st.newChars);
+  const tk = (t, i, k) => { if (!t[1]) return `<span class="pn">${esc(t[0])}</span>`;
+    return `<span class="tk"><span class="cj">${[...t[0]].map((c, j) => `<span class="ch ${nw.has(c) ? 'nw' : ''} ${sChar && sChar.s === i && sChar.t === k && sChar.k === j ? 'sel' : ''}" data-s="${i}" data-t="${k}" data-k="${j}" onclick="tapChar(event,${i},${k},${j})">${esc(c)}</span>`).join('')}</span><span class="jp">${esc(t[1])}</span></span>`; };
+  m.innerHTML = `<div class="bar"><button class="b" onclick="storyBack()">返回故事</button><span class="pg" role="status">第 ${sPage + 1} / ${P} 頁</span></div>` +
+    `<div class="tbar" aria-hidden="true"><i style="width:${Math.round((sPage + 1) * 100 / P)}%"></i></div>` +
+    `<h2 class="stitle">${esc(st.title.zh)}${sShowEn ? ` <small>${esc(st.title.en)}</small>` : ''}</h2>` +
+    `<div class="row sctl"><button class="b p" onclick="playStory()" aria-label="播放全文">▶ 播放全文</button><button class="b" onclick="stopStory()" aria-label="停止">■ 停止</button><button class="b" onclick="replayLast()" aria-label="重播">🔁 重播</button></div>` +
+    `<div class="row sopt"><label class="tog"><input type="checkbox" ${sShowJp ? 'checked' : ''} onchange="sShowJp=this.checked;render()"> 粵拼</label><label class="tog"><input type="checkbox" ${sShowEn ? 'checked' : ''} onchange="sShowEn=this.checked;render()"> English</label></div>` +
+    `<div class="story ${sShowJp ? 'showjp' : ''} ${sShowEn ? 'showen' : ''}">` + st.sentences.slice(a, a + pageSize(st)).map((sn, o) => { const i = a + o;
+      return `<div class="sent ${sPlaying === i ? 'playing' : ''}" data-i="${i}" onclick="playSentence(${i})" role="button" aria-label="播放第 ${i + 1} 句"><span class="tks">${sn.tokens.map((t, k) => tk(t, i, k)).join('')}</span><div class="en">${esc(sn.en)}</div></div>`; }).join('') + `</div>` +
+    `<div id="sinfo" class="sinfo" role="status">${charInfo(st)}</div>` +
+    `<div class="row snav"><button class="b" ${sPage ? '' : 'disabled'} onclick="storyPage(-1)">上一頁</button>${last ? '<button class="b p" onclick="finishStory()">我讀完了 ✓</button>' : '<button class="b p" onclick="storyPage(1)">下一頁</button>'}</div>`;
+}
+/* the word (with its meaning) and, when the word has the same number of syllables as characters, the syllable of the tapped character */
+function charInfo(st) {
+  if (!sChar) return '<small>按一下字可以聽發音，按一下句子可以聽整句。</small>';
+  const t = st.sentences[sChar.s] && st.sentences[sChar.s].tokens[sChar.t]; if (!t) return '';
+  const c = [...t[0]][sChar.k], syl = t[1] ? t[1].split(' ') : [], one = syl.length === [...t[0]].length ? syl[sChar.k] : '';
+  return `<span class="han big">${esc(c)}</span> ${one ? `<b>${esc(one)}</b>` : ''}${[...t[0]].length > 1 ? `　詞語：<span class="han">${esc(t[0])}</span> <small>${esc(t[1] || '')}${t[2] ? '・' + esc(t[2]) : ''}</small>` : (t[2] ? `　<small>${esc(t[2])}</small>` : '')}`;
+}
+function markAudio() { const st = sid && Q.story(sid); if (st && !st.audioUsed) Q.updateStory(sid, s => (s.audioUsed ? {} : { audioUsed: true })); }
+function tapChar(ev, i, k, j) {
+  ev.stopPropagation(); const st = Q.story(sid); if (!st) return; sChar = { s: i, t: k, k: j };
+  document.querySelectorAll('.ch.sel').forEach(e => e.classList.remove('sel')); ev.currentTarget.classList.add('sel');
+  const info = $('#sinfo'); if (info) info.innerHTML = charInfo(st);
+  unlockSpeech(); markAudio(); speak([...st.sentences[i].tokens[k][0]][j]);
+}
+function setPlaying(i) { sPlaying = i; document.querySelectorAll('.sent').forEach(e => e.classList.toggle('playing', +e.dataset.i === i)); }
+function playSentence(i) {
+  const st = Q.story(sid); if (!st || !st.sentences[i]) return; unlockSpeech(); markAudio(); sLast = i;
+  speakList([st.sentences[i].zh], { onStart: () => setPlaying(i), onEnd: () => setPlaying(-1) });
+}
+function playStory() {
+  const st = Q.story(sid); if (!st) return; unlockSpeech(); markAudio();
+  speakList(st.sentences.map(x => x.zh), { onStart: j => { sLast = j; const p = Math.floor(j / pageSize(st)); if (p !== sPage) { sPage = p; render(); } setPlaying(j); }, onEnd: () => setPlaying(-1) });
+}
+function stopStory() { silence(); setPlaying(-1); }
+function replayLast() { if (sLast !== null) playSentence(sLast); else playStory(); }
+function storyPage(d) {
+  const st = Q.story(sid); if (!st) return; sPage = Math.min(Math.max(sPage + d, 0), storyPages(st) - 1); sChar = null;
+  if (!st.completedAt) Q.updateStory(sid, s => (s.completedAt ? {} : { page: sPage })); render();
+}
+async function finishStory() {
+  const q = Q, st = q.story(sid); if (!st) return; silence(); await storyFlush();                    // the reading time is saved first, then the completion on top of it
+  if (!st.completedAt) { const r = await q.updateStory(sid, s => (s.completedAt ? {} : { completedAt: Date.now(), page: sPage })); if (q !== Q) return; if (!r.ok) { showBar(`<b>閱讀紀錄沒有儲存成功。</b>（${esc(reason(r.error))}）`, 'hideErr'); return; } }
+  hideErr(); sPhase = 'done'; sSince = null; sPlaying = -1; render();
+}
+function vStoryDone(m, st) {
+  m.innerHTML = `<div class="stage"><h2>🎉 讀完了！</h2><p class="han mid">${esc(st.title.zh)}</p><p>用了 ${readTime(st.readMs || 0)}</p>` +
+    (st.newChars.length ? `<p>故事裏的新字：<span class="han">${st.newChars.map(esc).join(' ')}</span></p>` : '<p>故事裏的字你都認識！</p>') +
+    `<div class="row">${st.questions.length ? '<button class="b p" onclick="startQuiz()">試試理解題</button>' : ''}<button class="b" data-id="${esc(st.id)}" onclick="openStory(this.dataset.id)">再讀一次</button><button class="b" onclick="storyBack()">返回故事</button></div></div>`;
+}
+/* optional comprehension questions: only after reading, immediate feedback, a final score; kept apart from the exam system */
+function startQuiz() { sq = { i: 0, picked: null, correct: 0 }; sPhase = 'quiz'; render(); }
+function vStoryQuiz(m, st) {
+  const q = st.questions[sq.i], n = st.questions.length, p = sq.picked;
+  m.innerHTML = `<div class="bar"><span class="pg" role="status">理解題 ${sq.i + 1} / ${n}</span></div><div class="stage"><p class="han qtext">${esc(q.zh)}</p><button class="b spk" onclick="speak(Q.story(sid).questions[sq.i].zh)" aria-label="讀出問題">🔊</button>` +
+    `<div class="qopts">${q.options.map((o, i) => `<button class="b qopt ${p === null ? '' : i === q.answer ? 'right' : i === p ? 'wrong' : ''}" ${p === null ? '' : 'disabled'} onclick="pickAns(${i})">${esc(o)}</button>`).join('')}</div>` +
+    (p === null ? '' : `<p class="${p === q.answer ? 'g' : 'warn'}" role="status"><b>${p === q.answer ? '答對了！👏' : '再想想！正確答案是「' + esc(q.options[q.answer]) + '」'}</b></p><div class="row"><button class="b p" onclick="nextQ()">${sq.i + 1 < n ? '下一題' : '看分數'}</button></div>`) + `</div>`;
+}
+function pickAns(i) { const st = Q.story(sid); if (!st || !sq || sq.picked !== null) return; sq.picked = i; if (i === st.questions[sq.i].answer) sq.correct++; render(); }
+async function nextQ() {
+  const q = Q, st = q.story(sid); if (!st || !sq) return;
+  if (sq.i + 1 < st.questions.length) { sq.i++; sq.picked = null; render(); return; }
+  const r = await q.updateStory(sid, () => ({ comprehension: { score: sq.correct, total: st.questions.length } })); if (q !== Q) return;
+  if (!r.ok) showBar(`<b>分數沒有儲存成功。</b>（${esc(reason(r.error))}）`, 'hideErr'); sPhase = 'score'; render();
+}
+function vStoryScore(m, st) {
+  const c = st.comprehension || { score: sq ? sq.correct : 0, total: st.questions.length };
+  m.innerHTML = `<div class="stage"><h2>理解題分數</h2><p class="han big">${c.score} / ${c.total}</p><p>${c.score === c.total ? '全部答對！🌟' : '很好，再讀一次故事會更清楚！'}</p><div class="row"><button class="b" data-id="${esc(st.id)}" onclick="openStory(this.dataset.id)">再讀一次故事</button><button class="b" onclick="startQuiz()">再做一次</button><button class="b p" onclick="storyBack()">返回故事</button></div></div>`;
+}
+
 /* ---------- session ---------- */
 function sess(m) {
   if (res) return result(m);
@@ -152,14 +318,30 @@ async function mark(ok) { const q = Q; after(await q.answerRead(ok), '這一題�
 function say(k) { const it = Q.cur.items[Q.cur.i]; speak(k === 'w' ? it.w : it.c); }
 /* Speak ONE utterance (zh-HK voice when available). cancel() first: never two voices at once. silence() stops speech when leaving a question.
    quiet = automatic speech: never show messages, never throw. */
-function silence() { try { const ss = window.speechSynthesis; if (ss) ss.cancel(); } catch (e) { } }
+function silence() { listTok++; try { const ss = window.speechSynthesis; if (ss) ss.cancel(); } catch (e) { } }
+/* the speech service with a Cantonese voice if there is one (quiet = never show messages) */
+function ttsStart(quiet) {
+  const ss = window.speechSynthesis; if (!ss || !window.SpeechSynthesisUtterance) { if (!quiet) toast('這部裝置不支援語音'); return null; }
+  const v = ss.getVoices().find(x => /zh[-_]HK|yue/i.test(x.lang)); if (!v && !quiet) toast('找不到廣東話語音，發音可能不準確');
+  return { ss, v };
+}
+const utt = (t, v) => { const u = new SpeechSynthesisUtterance(t); u.lang = 'zh-HK'; if (v) u.voice = v; u.rate = .8; return u; };
 function speak(t, quiet) {
-  if (!t) return; const ss = window.speechSynthesis; if (!ss || !window.SpeechSynthesisUtterance) { if (!quiet) toast('這部裝置不支援語音'); return; }
+  if (!t) return; const x = ttsStart(quiet); if (!x) return;
+  try { x.ss.cancel(); x.ss.speak(utt(t, x.v)); } catch (e) { if (!quiet) toast('無法播放語音'); }
+}
+/* Several phrases in a row (a story): all queued at once, so the speech service plays them back to back with no timers and no gaps of our own.
+   onStart(i) fires as phrase i begins (to highlight it), onEnd() when the last one ends or fails. A newer call or silence() makes older callbacks harmless. */
+let listTok = 0;
+function speakList(parts, h) {
+  parts = parts.filter(Boolean); if (!parts.length) return false;
+  const x = ttsStart(false); if (!x) return false; const my = ++listTok;
   try {
-    const v = ss.getVoices().find(x => /zh[-_]HK|yue/i.test(x.lang));
-    if (!v && !quiet) toast('找不到廣東話語音，發音可能不準確');
-    ss.cancel(); const u = new SpeechSynthesisUtterance(t); u.lang = 'zh-HK'; if (v) u.voice = v; u.rate = .8; ss.speak(u);
-  } catch (e) { if (!quiet) toast('無法播放語音'); }
+    x.ss.cancel();
+    parts.forEach((t, i) => { const u = utt(t, x.v); u.onstart = () => { if (listTok === my && h && h.onStart) h.onStart(i); };
+      u.onend = u.onerror = () => { if (listTok === my && i === parts.length - 1 && h && h.onEnd) h.onEnd(); }; x.ss.speak(u); });
+    return true;
+  } catch (e) { toast('無法播放語音'); return false; }
 }
 /* iOS only allows speech that was started from a tap: prime it synchronously inside the tap handler, before any await. */
 function unlockSpeech() {
@@ -273,7 +455,7 @@ function result(m) {
   m.innerHTML = `<h2>${LB(r)}結果</h2><div class="card"><div class="line"><span>級別</span><b>${esc(r.levelName)}</b></div><div class="line"><span>類型</span><b>${LB(r)}</b></div><div class="line"><span>用時</span><b>${durText(r)}</b></div><div class="line"><span>題數</span><b>${a.t}</b></div>${r.endedEarly ? `<div class="line"><span>完成</span><b>${a.t} / ${r.planned || a.t} 題（提早結束）</b></div>` : ''}<div class="line"><span>正確</span><b class="g">${a.o}</b></div><div class="line"><span>錯誤</span><b class="rd">${a.t - a.o}</b></div><div class="line"><span>準確率</span><b>${a.p}%</b></div></div>` +
     (bad.length ? `<div class="card"><h3>錯誤的字</h3><div class="han mid">${bad.map(x => esc(x.c)).join(' ')}</div></div>` : '<p class="g"><b>全部正確！</b></p>') +
     examSummary(r) +
-    `<div class="row">${corrButton(r)}${bad.length ? `<button class="b p" onclick="revise()">重新溫習</button>` : ''}<button class="b" onclick="go('${r.mode === 'exam' ? 'exam' : 'practice'}')">返回</button></div>`;
+    `<div class="row">${corrButton(r)}${bad.length ? `<button class="b p" onclick="revise()">重新溫習</button>` : ''}<button class="b" onclick="go('${String(r.levelId).startsWith('topic:') ? 'topics' : r.mode === 'exam' ? 'exam' : 'practice'}')">返回</button></div>`;
 }
 /* Exam only: where this exam's characters stand now (after the statistics were updated): needs more practice / improving / mastered. */
 function examSummary(r) {
@@ -286,7 +468,7 @@ function examSummary(r) {
 }
 async function revise() {
   unlockSpeech();
-  const q = Q, r = res, rr = await q.startSession({ kind: r.kind, levelId: r.levelId, mode: 'revision', parentId: r.id, chars: r.items.filter(x => !x.ok).map(x => ({ id: x.cid, c: x.c, jp: x.jp, w: x.w, wjp: x.wjp })) });
+  const q = Q, r = res, rr = await q.startSession({ kind: r.kind, levelId: r.levelId, levelName: r.levelName, mode: 'revision', parentId: r.id, chars: r.items.filter(x => !x.ok).map(x => ({ id: x.cid, c: x.c, jp: x.jp, w: x.w, wjp: x.wjp })) });
   if (q !== Q || rr.busy) return;
   if (rr.duplicate) { toast('這次溫習已有未完成的進度，繼續上次的進度'); return resume(rr.existing); }
   if (!rr.ok) { alert('無法開始溫習（' + reason(rr.error) + '）。'); return; }
@@ -296,7 +478,7 @@ async function revise() {
 function vHist(m) {
   if (rid) { const r = Q.records.find(x => x.id === rid); if (r) {
     m.innerHTML = `<button class="b" onclick="rid=null;render()">返回</button><h2>${LB(r)}・${esc(r.levelName)}</h2><p>${fd(r.date)}　用時 ${durText(r)}${r.parentId ? '（溫習）' : ''}${r.endedEarly ? `（提早結束：${r.items.length} / ${r.planned || r.items.length} 題）` : ''}</p><div class="grid">` + r.items.map(x => `<div class="card"><div class="han mid">${esc(x.c)}</div><div>${esc(x.w)}</div><b class="${x.ok ? 'g' : 'rd'}">${x.ok ? '正確' : '錯誤'}</b>${x.imgId ? `<img data-img="${esc(x.imgId)}" alt="">` : ''}</div>`).join('') + '</div>'; return; } }
-  const ids = [...new Set([...Q.levels.map(l => l.id), ...Q.records.map(r => r.levelId)])];
+  const ids = [...new Set([...Q.levels.filter(l => !l.hidden).map(l => l.id), ...Q.records.map(r => r.levelId)])];
   m.innerHTML = '<h2>學習紀錄</h2>' + (ids.map(id => {
     const rs = Q.records.filter(r => r.levelId === id), nm = lv(id) ? lv(id).name : (rs[0] ? rs[0].levelName : '');
     const blocks = ['read', 'write'].map(k => { const kr = rs.filter(r => r.kind === k), a = agg(kr), f = freq(kr);
@@ -531,9 +713,9 @@ async function applyUpdate() {
 /* ---------- learners: picking, switching, managing ---------- */
 const ACTIVE_KEY = 'cq-active-profile';   // sessionStorage: survives a page refresh in this tab, forgotten when the tab/app is closed
 function resetLearnerState() {            // nothing of the previous learner may stay in memory or on screen
-  bk = null; mkIdx = null; mkBusy = false; endBusy = false; tab = 'levels'; lid = null; rid = null; inS = false; res = null; dirty = false; drawing = false; cv = cx = null;
+  bk = null; sid = null; sPhase = 'read'; sq = null; sChar = null; sPlaying = -1; sSince = null; sSel = { diff: null, topic: null }; sBusy = false; tid = null; tOnly = false; mkIdx = null; mkBusy = false; endBusy = false; tab = 'levels'; lid = null; rid = null; inS = false; res = null; dirty = false; drawing = false; cv = cx = null;
   corrId = null; corrSum = false; cs = []; ccv = null; cFeed = ''; cmIdx = null; cBusy = false; Object.values(cTimers).forEach(clearTimeout); cTimers = {}; cFail.clear(); autoKey = null;
-  silence(); if (Q) Q.qPause(); hideErr(); document.querySelectorAll('.modal').forEach(d => d.remove());
+  silence(); storyFlush(); if (Q) Q.qPause(); hideErr(); document.querySelectorAll('.modal').forEach(d => d.remove());
   const t = $('#toast'); if (t) t.hidden = true;
   $('#main').innerHTML = '';
 }
@@ -614,7 +796,8 @@ async function boot() {
   catch (e) { return fatal('資料轉移未能完成', '學習內容的整理未能完成。原有的資料沒有被刪除，也沒有改動。請按「重試」。', true); }
   const flushNow = () => { if (Q && Q.cur) Q.flushDraft().catch(() => { }); if (Q && corrId) flushCorr().catch(() => { }); };
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') { if (Q) Q.qPause(); flushNow(); }
+    if (document.visibilityState === 'hidden') { if (Q) Q.qPause(); storyFlush(); flushNow(); }
+    else if (sid && sPhase === 'read' && tab === 'stories') storyResume();
     else if (Q && inS && !res && Q.cur && Q.cur.phase === 'ask') Q.qStart(Q.cur.id + ':' + Q.cur.i);   // time away from the page is not response time
   });
   window.addEventListener('pagehide', flushNow);

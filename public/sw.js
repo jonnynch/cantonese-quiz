@@ -7,7 +7,7 @@
    VERSION is the hash of the PRECACHE files; run `npm run stamp-sw` after changing anything in public/ (a test enforces this). */
 'use strict';
 const PREFIX = 'cq-shell-';
-const VERSION = 'f0f03d2b98aa';
+const VERSION = 'db6241300f78';
 const CACHE = PREFIX + VERSION;
 const PRECACHE = [
   './',
@@ -20,6 +20,9 @@ const PRECACHE = [
   'js/core.js',
   'js/profiles.js',
   'js/backup.js',
+  'js/topics.js',
+  'js/story-data.js',
+  'js/story.js',
   'js/pwa.js',
   'js/app.js',
 ];
